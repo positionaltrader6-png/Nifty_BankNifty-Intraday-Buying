@@ -294,7 +294,7 @@ tab_live, tab_config = st.tabs(["🔴 Live Trading", "⚙️ Configuration"])
 
 with tab_config:
     st.subheader("System Configuration")
-    sheet_id_input = st.text_input("Google Sheet ID", value="1tiVgr1CdbKVrnf-HJM1cVDYy8ltrLo6VnRaTK9IJn_4")
+    sheet_id_input = st.text_input("Google Sheet ID", value="1X9pcz5Cgj697wPgRjSBu-DescbaZkq_KLw6xrpw8vJE")
     nifty_expiry_input = st.date_input("NIFTY Expiry Date", value=dt.date(2026, 9, 1))
     st.info("Changes made here will be applied the next time you click 'Start Engine'.")
 
