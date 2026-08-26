@@ -237,11 +237,11 @@ def add_intraday_indicators(df):
     return df
 
 # ─── 4. LIVE ENGINE THREAD (v7.3 HYBRID MATCHED) ───
-def run_live_trading_engine(stop_event, sheet_id, nifty_expiry):
+def run_live_trading_engine(stop_event, sheet_id, nifty_expiry, is_paper_trading):
     ACTIVE_POSITION = None
     DAILY_TRADE_COUNT = 0
     TRADING_DATE = get_ist_now().date()
-    mode_text = "PAPER TRADING"
+    mode_text = "PAPER TRADING" if is_paper_trading else "LIVE MONEY"
 
     send_telegram_alert(f"🚀 *NIFTY Pro Momentum Engine v7.3 Started*\nMode: `{mode_text}`\nExpiry: {nifty_expiry.strftime('%d-%b-%Y')}")
 
@@ -255,8 +255,15 @@ def run_live_trading_engine(stop_event, sheet_id, nifty_expiry):
         return
 
     def execute_order(action, symbol, token, qty, price, smart_obj):
-        logging.info(f"[PAPER] {action}: {symbol} @ {price}")
-        return {"status": True}
+        if is_paper_trading:
+            logging.info(f"[PAPER] {action}: {symbol} @ {price}")
+            return {"status": True}
+        order_params = {
+            "variety": "NORMAL", "tradingsymbol": symbol, "symboltoken": token,
+            "transactiontype": action, "exchange": "NFO", "ordertype": "MARKET",
+            "producttype": "INTRADAY", "duration": "DAY", "quantity": str(qty)
+        }
+        return smart_obj.placeOrder(order_params)
 
     last_processed_ts = None
 
@@ -643,7 +650,8 @@ with tab_live:
     with col1:
         live_expiry_input = st.date_input("Select NIFTY Expiry Date", value=dt.date(2026, 9, 1), key="live_exp")
     with col2:
-        st.info("Execution Mode: **Paper Trading (Simulation) Only** 🔒")
+        execution_mode = st.radio("Execution Mode", options=["Paper Trading (Simulation)", "Live Money (Real Execution)"], horizontal=True, disabled=st.session_state.is_running)
+        is_paper = (execution_mode == "Paper Trading (Simulation)")
 
     st.divider()
 
@@ -652,7 +660,7 @@ with tab_live:
             st.session_state.stop_event.clear()
             st.session_state.bot_thread = threading.Thread(
                 target=run_live_trading_engine,
-                args=(st.session_state.stop_event, st.session_state.get("sheet_id", "1tiVgr1CdbKVrnf-HJM1cVDYy8ltrLo6VnRaTK9IJn_4"), live_expiry_input),
+                args=(st.session_state.stop_event, st.session_state.get("sheet_id", "1tiVgr1CdbKVrnf-HJM1cVDYy8ltrLo6VnRaTK9IJn_4"), live_expiry_input, is_paper),
                 daemon=True
             )
             st.session_state.bot_thread.start()
