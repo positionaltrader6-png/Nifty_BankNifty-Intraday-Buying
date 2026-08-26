@@ -1,0 +1,9 @@
+streamlit
+smartapi-python
+pyotp
+pandas
+numpy
+gspread
+google-auth
+requests
+pytz
