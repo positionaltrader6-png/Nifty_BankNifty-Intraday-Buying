@@ -7,3 +7,4 @@ gspread
 google-auth
 requests
 pytz
+logzero
