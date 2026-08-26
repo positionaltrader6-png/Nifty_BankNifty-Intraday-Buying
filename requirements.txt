@@ -8,3 +8,4 @@ google-auth
 requests
 pytz
 logzero
+websocket
