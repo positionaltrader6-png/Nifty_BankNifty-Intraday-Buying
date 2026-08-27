@@ -907,6 +907,6 @@ with tab_backtest:
 # ── Tab 3: Configuration ──
 with tab_config:
     st.subheader("System Configuration")
-    sheet_id_input = st.text_input("Google Sheet ID", value="1tiVgr1CdbKVrnf-HJM1cVDYy8ltrLo6VnRaTK9IJn_4")
+    sheet_id_input = st.text_input("Google Sheet ID", value="1X9pcz5Cgj697wPgRjSBu-DescbaZkq_KLw6xrpw8vJE")
     st.session_state["sheet_id"] = sheet_id_input
     st.info("The Sheet ID will be used across Live Trading, State Recovery, and Backtest logging.")
