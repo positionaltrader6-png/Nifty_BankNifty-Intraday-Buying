@@ -884,7 +884,7 @@ with tab_backtest:
     if st.button("🚀 Run Backtest Suite (Spot 13 vs Prem 13/15/21 EMA)", use_container_width=True):
         with st.spinner("Fetching candles and computing multi-strategy backtest..."):
             try:
-                sheet_id = st.session_state.get("sheet_id", "1tiVgr1CdbKVrnf-HJM1cVDYy8ltrLo6VnRaTK9IJn_4")
+                sheet_id = st.session_state.get("sheet_id", "1X9pcz5Cgj697wPgRjSBu-DescbaZkq_KLw6xrpw8vJE")
                 summary_df, trades_dict = run_backtest_suite(bt_und, bt_date, bt_exp, sheet_id)
 
                 st.success("✅ Backtest run completed successfully!")
