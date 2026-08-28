@@ -631,9 +631,9 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                 "latest_opt_price": entry_price,
                 "latest_opt_sl": opt_ema_sl,
                 "last_alerted_sl": ema_sl if config["exit_mode"] == "SPOT_EMA" else opt_ema_sl,
-                "trade_sheet": make_trade_sheet_name(underlying, daily_trade_counts[underlying], trading_date)
+                "trade_sheet": make_trade_sheet_name(underlying, daily_trade_counts[underlying])
             }
-            save_open_position_to_sheet(sh, underlying, active_positions[underlying], trading_date)
+            save_open_position_to_sheet(sh, underlying, active_positions[underlying])
             log_trade_event(
                 sh, active_positions[underlying]["trade_sheet"], "ENTRY",
                 close, entry_price, ema_sl, opt_ema_sl, 0.0, notes=signal
@@ -785,7 +785,7 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
 
 
         for idx, row in day_df.iterrows():
-            ts, t, close = row["timestamp"], row["timestamp"].time(), row["close"]
+            ts, t, close, high, low, ema_sl = row["timestamp"], row["timestamp"].time(), row["close"], row["high"], row["low"], row["ema_sl"]
             if t > dt.time(15, 10):
                 break
 
@@ -804,9 +804,9 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
                     elif t >= EOD_EXIT_TIME:
                         exit_reason = "EOD_SQUAREOFF"
                     elif strat["mode"] == "SPOT_EMA":
-                        if position["direction"] == "CE" and close < row["ema_sl"]:
+                        if position["direction"] == "CE" and close < ema_sl:
                             exit_reason = f"SPOT_EMA{strat['period']}_CROSSDOWN"
-                        elif position["direction"] == "PE" and close > row["ema_sl"]:
+                        elif position["direction"] == "PE" and close > ema_sl:
                             exit_reason = f"SPOT_EMA{strat['period']}_CROSSUP"
                     elif strat["mode"] == "PREMIUM_EMA":
                         ema_col = f"ema_sl_{strat['period']}"
