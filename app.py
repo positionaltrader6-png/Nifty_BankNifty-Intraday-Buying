@@ -785,7 +785,7 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
 
 
         for idx, row in day_df.iterrows():
-            ts, t, close, high, low, ema_sl = row["timestamp"], row["timestamp"].time(), row["close"], row["high"], row["low"], row["ema_sl"]
+            ts, t, close = row["timestamp"], row["timestamp"].time(), row["close"]
             if t > dt.time(15, 10):
                 break
 
@@ -804,13 +804,13 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
                     elif t >= EOD_EXIT_TIME:
                         exit_reason = "EOD_SQUAREOFF"
                     elif strat["mode"] == "SPOT_EMA":
-                        if position["direction"] == "CE" and close < ema_sl:
+                        if position["direction"] == "CE" and close < row["ema_sl"]:
                             exit_reason = f"SPOT_EMA{strat['period']}_CROSSDOWN"
-                        elif position["direction"] == "PE" and close > ema_sl:
+                        elif position["direction"] == "PE" and close > row["ema_sl"]:
                             exit_reason = f"SPOT_EMA{strat['period']}_CROSSUP"
                     elif strat["mode"] == "PREMIUM_EMA":
-                        opt_ema_val = matching_candle.iloc[0]["ema_sl"]
-                        if current_price < opt_ema_val:
+                        ema_col = f"ema_sl_{strat['period']}"
+                        if current_price < matching_candle.iloc[0][ema_col]:
                             exit_reason = f"PREMIUM_EMA{strat['period']}_CROSSDOWN"
 
 
@@ -870,23 +870,19 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
 
 
                 if signal:
-                    atm_strike = int(round(close / config["strike_step"]) * config["strike_step"])
+                    atm_strike = int(round(close / strike_step) * strike_step)
                     sym, tok = fetch_option_token(lookup, underlying, expiry_date, atm_strike, signal)
                     if tok:
-                        if tok in option_cache:
-                            opt_df = option_cache[tok].copy()
-                        else:
+                        if tok not in option_cache:
                             opt_df, smart = get_candles_with_relogin(smart, tok, warmup_from, day_to, exchange="NFO", interval=INTERVAL)
                             if not opt_df.empty:
                                 option_cache[tok] = opt_df.copy()
-
-
-                        if not opt_df.empty:
-                            opt_df["ema_sl"] = opt_df["close"].ewm(span=strat["period"], adjust=False).mean()
-                            opt_row = opt_df[opt_df["timestamp"] == ts]
-                            if not opt_row.empty:
-                                raw_entry = opt_row.iloc[0]["close"]
-                                entry_exec, _ = apply_slippage("BUY", raw_entry)
+                        if tok in option_cache and not option_cache[tok].empty:
+                            ema_col = f"ema_sl_{strat['period']}"
+                            if ema_col not in option_cache[tok].columns:
+                                option_cache[tok][ema_col] = option_cache[tok]["close"].ewm(span=strat["period"], adjust=False).mean()
+                            if not option_cache[tok][option_cache[tok]["timestamp"] == ts].empty:
+                                raw_entry = option_cache[tok][option_cache[tok]["timestamp"] == ts].iloc[0]["close"]
                                 trades_count += 1
                                 position = {
                                     "direction": signal,
