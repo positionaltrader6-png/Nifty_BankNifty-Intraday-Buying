@@ -1,17 +1,19 @@
 """
 ================================================================================
-NIFTY & BANKNIFTY Pro Momentum Engine — Streamlit Dashboard (v7.3 Engine)
+Intraday Option BUYING — Streamlit Live Engine & Backtesting Suite (v7.3 Hybrid)
 ================================================================================
-Integrated Features:
-1. Live Trading Engine with Double-Fetch Settling & State Recovery (Open_Positions tab)
-2. Multi-Index Hybrid Configuration (NIFTY 0.9 / BANKNIFTY 1.0 Loxx multipliers)
-3. Multi-Strategy Backtesting Suite (Spot 13 EMA, Premium 13/15/21 EMA)
-4. Persistent Google Sheets Logging (Heartbeats, Trade Logs, Dedicated Monitor Tabs)
+Features:
+1. Live Trading Engine: Parallel evaluation of NIFTY & BANKNIFTY via ThreadPoolExecutor.
+2. Zero-Lag Candle Alignment: Exact timestamp matching to eliminate forming-candle glitches.
+3. State Recovery & Sheet Persistence: Open_Positions tab tracking across restarts.
+4. Multi-Strategy Backtesting Suite: Spot 13 EMA, Premium 13/15/21 EMA exits.
+5. Dynamic Sidebar Configuration: Expiries and Loxx Multipliers adjustable in real-time.
 ================================================================================
 """
 
 import streamlit as st
 import threading
+import concurrent.futures
 import datetime as dt
 import time
 import logging
@@ -31,14 +33,24 @@ IST = pytz.timezone("Asia/Kolkata")
 def get_ist_now():
     return dt.datetime.now(IST).replace(tzinfo=None)
 
+# ── API Credentials (Read from st.secrets or fallback to configuration) ──
+def get_secret(key, default=""):
+    return st.secrets.get(key, default) if hasattr(st, "secrets") else default
+
+API_KEY = get_secret("API_KEY", "Masked")
+CLIENT_ID = get_secret("CLIENT_ID", "Masked")
+PASSWORD = get_secret("PASSWORD", "Masked")
+TOTP_SECRET = get_secret("TOTP_SECRET", "Masked")
+
+GOOGLE_SHEET_ID = get_secret("GOOGLE_SHEET_ID", "1tiVgr1CdbKVrnf-HJM1cVDYy8ltrLo6VnRaTK9IJn_4")
+GOOGLE_SERVICE_ACCOUNT_JSON = "service_account.json"
+
+TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", "8981928115:AAEtIU9VAix-mwD52zis38Wql4eD8kLEKcI")
+TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID", "8672437349")
+
 UNDERLYING_INDICES = ["NIFTY", "BANKNIFTY"]
 INTERVAL = "THREE_MINUTE"
 INDICATOR_WARMUP_DAYS = 5
-
-INDEX_PARAMS = {
-    "NIFTY": {"token": "99926000", "strike_step": 50, "lot_size": 65, "loxx_mult": 1.0, "exit_mode": "SPOT_EMA"},
-    "BANKNIFTY": {"token": "99926009", "strike_step": 100, "lot_size": 15, "loxx_mult": 1.0, "exit_mode": "SPOT_EMA"}
-}
 
 # ── Indicator Parameters ──
 KC_PERIOD = 20
@@ -52,12 +64,10 @@ CHOP_PERIOD = 14
 LOXX_PERIOD = 40
 LOXX_DEV = 1.0
 
-# ── Freshness & Stability Settings ──
+# ── Execution Settings ──
 DATA_FRESHNESS_RETRIES = 8
 DATA_FRESHNESS_RETRY_DELAY = 15
-CANDLE_STABILITY_CHECK_DELAY = 10
 
-# ── Risk Management ──
 STOP_LOSS_PCT = 10.0
 MAX_TRADES_PER_DAY = 3
 ENTRY_WINDOW_START = dt.time(9, 30)
@@ -65,6 +75,16 @@ ENTRY_WINDOW_END = dt.time(14, 30)
 EOD_EXIT_TIME = dt.time(15, 0)
 MARKET_OPEN = dt.time(9, 15)
 MARKET_CLOSE = dt.time(15, 30)
+
+# ── Costs & Slippage (NSE Options) ──
+ENABLE_TRANSACTION_COSTS = True
+BROKERAGE_PER_ORDER = 20.0
+STT_SELL_PCT = 0.0625 / 100
+EXCHANGE_TXN_PCT = 0.03503 / 100
+GST_PCT = 18.0 / 100
+SEBI_CHARGES_PCT = 0.0001 / 100
+STAMP_DUTY_PCT = 0.003 / 100
+SLIPPAGE_PCT = 0.10 / 100
 
 INSTRUMENT_MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 INSTRUMENT_MASTER_URL_FALLBACK = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -92,38 +112,44 @@ TRADE_MONITOR_HEADERS = [
     "spot_13ema_sl", "premium_13ema_sl", "pnl_pct", "notes"
 ]
 
-# ── Costs & Slippage (NSE Options) ──
-ENABLE_TRANSACTION_COSTS = True
-BROKERAGE_PER_ORDER = 20.0
-STT_SELL_PCT = 0.0625 / 100
-EXCHANGE_TXN_PCT = 0.03503 / 100
-GST_PCT = 18.0 / 100
-SEBI_CHARGES_PCT = 0.0001 / 100
-STAMP_DUTY_PCT = 0.003 / 100
-SLIPPAGE_PCT = 0.10 / 100
+# ─── 2. SIDEBAR CONFIGURATION ───
+st.sidebar.header("⚙️ Index Parameters")
 
-# ─── 2. AUTHENTICATION & API HELPERS ───
+nifty_expiry = st.sidebar.date_input("NIFTY Expiry Date", value=dt.date(2026, 9, 1), key="sb_nifty_exp")
+nifty_loxx = st.sidebar.number_input("NIFTY Loxx Multiplier", value=1.0, step=0.1, key="sb_nifty_loxx")
+
+bn_expiry = st.sidebar.date_input("BANKNIFTY Expiry Date", value=dt.date(2026, 9, 29), key="sb_bn_exp")
+bn_loxx = st.sidebar.number_input("BANKNIFTY Loxx Multiplier", value=1.0, step=0.1, key="sb_bn_loxx")
+
+sheet_id_input = st.sidebar.text_input("Google Sheet ID", value=GOOGLE_SHEET_ID, key="sb_sheet_id")
+
+INDEX_PARAMS = {
+    "NIFTY": {"token": "99926000", "strike_step": 50, "lot_size": 65, "loxx_mult": nifty_loxx, "exit_mode": "SPOT_EMA", "expiry": nifty_expiry},
+    "BANKNIFTY": {"token": "99926009", "strike_step": 100, "lot_size": 15, "loxx_mult": bn_loxx, "exit_mode": "SPOT_EMA", "expiry": bn_expiry}
+}
+
+# ─── 3. AUTHENTICATION & API HELPERS ───
 def login():
     from SmartApi import SmartConnect
-    obj = SmartConnect(api_key=st.secrets["API_KEY"])
-    totp = pyotp.TOTP(st.secrets["TOTP_SECRET"]).now()
-    data = obj.generateSession(st.secrets["CLIENT_ID"], st.secrets["PASSWORD"], totp)
+    obj = SmartConnect(api_key=API_KEY)
+    totp = pyotp.TOTP(TOTP_SECRET).now()
+    data = obj.generateSession(CLIENT_ID, PASSWORD, totp)
     if not data.get("status"):
         raise RuntimeError(f"SmartAPI login failed: {data}")
     return obj
 
 def get_sheet_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    service_account_info = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
+    if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
+        creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
+    else:
+        creds = Credentials.from_service_account_file(GOOGLE_SERVICE_ACCOUNT_JSON, scopes=scopes)
     return gspread.authorize(creds)
 
 def send_telegram_alert(message):
     try:
-        token = st.secrets["TELEGRAM_BOT_TOKEN"]
-        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=5)
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=5)
     except Exception as e:
         logging.error(f"Telegram alert failed: {e}")
 
@@ -135,18 +161,13 @@ def build_instrument_lookup(underlying):
         resp = requests.get(INSTRUMENT_MASTER_URL_FALLBACK, timeout=30)
         resp.raise_for_status()
     instruments = resp.json()
-    lookup = {}
-    for inst in instruments:
-        if inst.get("name") == underlying and inst.get("instrumenttype") == "OPTIDX":
-            lookup[inst["symbol"]] = inst["token"]
-    return lookup
+    return {inst["symbol"]: inst["token"] for inst in instruments if inst.get("name") == underlying and inst.get("instrumenttype") == "OPTIDX"}
 
 def expiry_to_symbol_str(expiry_date):
     return expiry_date.strftime("%d%b%y").upper()
 
 def fetch_option_token(lookup, underlying, expiry_date, strike, side):
-    exp_str = expiry_to_symbol_str(expiry_date)
-    symbol = f"{underlying}{exp_str}{strike}{side}"
+    symbol = f"{underlying}{expiry_to_symbol_str(expiry_date)}{strike}{side}"
     return symbol, lookup.get(symbol)
 
 def get_ltp(smart_obj, tradingsymbol, symboltoken, exchange="NFO"):
@@ -185,7 +206,7 @@ def get_candles_with_relogin(smart_obj, token, from_dt, to_dt, exchange="NSE", i
             time.sleep(1)
     return pd.DataFrame(), smart_obj
 
-# ─── 3. SHEETS & PERSISTENCE HELPERS ───
+# ─── 4. SHEETS & PERSISTENCE HELPERS ───
 def _with_retry(fn, max_retries=5, base_delay=2.0):
     for attempt in range(1, max_retries + 1):
         try:
@@ -279,7 +300,7 @@ def load_open_positions_from_sheet(sh, trading_date):
         }
         recovered[underlying] = position
     for i in sorted(stale_row_indices, reverse=True):
-        _with_retry(lambda i=i: ws.delete_rows(i))
+        _with_retry(lambda idx=i: ws.delete_rows(idx))
     return recovered
 
 def make_trade_sheet_name(underlying, trade_num, trading_date):
@@ -294,7 +315,7 @@ def log_trade_event(sh, tab_name, event, spot_price, premium_price, spot_sl, pre
     ]
     append_to_sheet(sh, tab_name, TRADE_MONITOR_HEADERS, row)
 
-# ─── 4. TECHNICAL INDICATORS ───
+# ─── 5. TECHNICAL INDICATORS ───
 def compute_keltner(df, period=KC_PERIOD, mult=KC_ATR_MULT):
     high, low, close = df["high"], df["low"], df["close"]
     basis = close.ewm(span=period, adjust=False).mean()
@@ -342,7 +363,9 @@ def compute_loxx_hlhvb(df, period=LOXX_PERIOD, dev=LOXX_DEV):
     buffer_me = compute_lwma(raw_hma, hull_period)
     hl_range = df["high"] - df["low"]
     deviation = hl_range.rolling(period).std(ddof=1)
-    return buffer_me + (deviation * dev), buffer_me, buffer_me - (deviation * dev)
+    buffer_up = buffer_me + (deviation * dev)
+    buffer_dn = buffer_me - (deviation * dev)
+    return buffer_up, buffer_me, buffer_dn
 
 def add_intraday_indicators(df):
     df = df.copy().reset_index(drop=True)
@@ -362,73 +385,40 @@ def add_intraday_indicators(df):
     df["chop_prev"] = df["chop"].shift(1)
     return df
 
-# ─── 5. LIVE EVALUATION LOGIC (ZERO-LAG SETTLED VERIFICATION) ───
+# ─── 6. LIVE EVALUATION & EXECUTION LOGIC ───
 def expected_latest_candle_ts(now):
     floored_minute = (now.minute // 3) * 3
     return now.replace(minute=floored_minute, second=0, microsecond=0)
 
-def fetch_fresh_day_df(smart, index_token, day_from, now, trading_date):
-    spot_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NSE", interval=INTERVAL)
-    if spot_df.empty:
-        return pd.DataFrame(), smart
-    spot_df = add_intraday_indicators(spot_df)
-    day_df = spot_df[spot_df["timestamp"].dt.date == trading_date].reset_index(drop=True)
-    return day_df, smart
-
-def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strike_step, expiry_date, active_positions, daily_trade_counts, last_processed_dict, trading_date):
-    day_from = dt.datetime.combine(trading_date, MARKET_OPEN)
+def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strike_step, expiry_date, active_positions, daily_trade_counts, last_processed, trading_date):
     now = get_ist_now()
+    day_from = dt.datetime.combine(trading_date, MARKET_OPEN)
     config = INDEX_PARAMS[underlying]
-
-    day_df, smart = fetch_fresh_day_df(smart, index_token, day_from, now, trading_date)
-    if day_df.empty:
-        return
-
     expected_ts = expected_latest_candle_ts(now)
-    is_fresh = (len(day_df) >= 2) and (day_df.iloc[-1]["timestamp"] >= expected_ts)
-    is_settled = False
-    settled_row = None
 
+    row = None
     for attempt in range(1, DATA_FRESHNESS_RETRIES + 1):
-        if not is_fresh:
-            latest_ts_str = day_df.iloc[-1]["timestamp"].strftime("%H:%M") if len(day_df) >= 1 else "none"
-            logging.warning(f"[{underlying}] Latest candle is {latest_ts_str}, expected {expected_ts.strftime('%H:%M')} (attempt {attempt}/{DATA_FRESHNESS_RETRIES}) — retrying in {DATA_FRESHNESS_RETRY_DELAY}s...")
+        spot_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NSE", interval=INTERVAL)
+        if spot_df.empty:
             time.sleep(DATA_FRESHNESS_RETRY_DELAY)
-        else:
-            candidate = day_df.iloc[-1]
-            candidate_ts = candidate["timestamp"]
-            time.sleep(CANDLE_STABILITY_CHECK_DELAY)
-            recheck_df, smart = fetch_fresh_day_df(smart, index_token, day_from, get_ist_now(), trading_date)
-            match = recheck_df[recheck_df["timestamp"] == candidate_ts] if not recheck_df.empty else pd.DataFrame()
-            if not match.empty:
-                m = match.iloc[0]
-                if (m["open"] == candidate["open"] and m["high"] == candidate["high"]
-                        and m["low"] == candidate["low"] and m["close"] == candidate["close"]):
-                    is_settled = True
-                    settled_row = m
-                    day_df = recheck_df
-                    break
-                else:
-                    logging.warning(f"[{underlying}] Candle {candidate_ts.strftime('%H:%M')} revising OHLC — waiting to settle...")
-                    day_df = recheck_df
-            else:
-                day_df = recheck_df if not recheck_df.empty else day_df
+            continue
+        day_df = add_intraday_indicators(spot_df)
+        day_df = day_df[day_df["timestamp"].dt.date == trading_date].reset_index(drop=True)
 
-        now = get_ist_now()
-        expected_ts = expected_latest_candle_ts(now)
-        is_fresh = (len(day_df) >= 2) and (day_df.iloc[-1]["timestamp"] >= expected_ts)
+        target_row = day_df[day_df["timestamp"] == expected_ts]
+        if not target_row.empty:
+            row = target_row.iloc[0]
+            break
+        time.sleep(DATA_FRESHNESS_RETRY_DELAY)
 
-    if not is_settled or settled_row is None:
-        logging.error(f"[{underlying}] Candle data still not synced/settled after {DATA_FRESHNESS_RETRIES} attempts.")
+    if row is None:
+        logging.error(f"[{underlying}] Candle {expected_ts.strftime('%H:%M')} not found after {DATA_FRESHNESS_RETRIES} retries.")
         return
 
-    row = settled_row
-    ts = row["timestamp"]
-    t = ts.time()
-
-    if last_processed_dict.get(underlying) == ts:
+    ts, t = row["timestamp"], row["timestamp"].time()
+    if last_processed.get(underlying) == ts:
         return
-    last_processed_dict[underlying] = ts
+    last_processed[underlying] = ts
 
     close, high, low, ema_sl = row["close"], row["high"], row["low"], row["ema_sl"]
     position = active_positions[underlying]
@@ -596,22 +586,20 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
             )
             send_telegram_alert(msg)
 
-# ─── 6. LIVE ENGINE THREAD ───
-def run_live_trading_engine(stop_event, sheet_id, nifty_exp, bn_exp):
+# ─── 7. LIVE ENGINE THREAD ───
+def run_live_trading_engine(stop_event, sheet_id):
     trading_date = get_ist_now().date()
     active_positions = {"NIFTY": None, "BANKNIFTY": None}
     daily_trade_counts = {"NIFTY": 0, "BANKNIFTY": 0}
     last_processed = {"NIFTY": None, "BANKNIFTY": None}
-    expiries = {"NIFTY": nifty_exp, "BANKNIFTY": bn_exp}
 
-    send_telegram_alert(f"🚀 *Pro Momentum Engine v7.3 Started*\nMonitoring NIFTY & BANKNIFTY.")
+    send_telegram_alert("🚀 *Pro Momentum Engine v7.3 Started*\nMonitoring NIFTY & BANKNIFTY.")
 
     try:
         smart = login()
         gc = get_sheet_client()
         sh = gc.open_by_key(sheet_id)
-        
-        # State Recovery
+
         recovered = load_open_positions_from_sheet(sh, trading_date)
         for und, pos in recovered.items():
             if und in active_positions:
@@ -646,17 +634,21 @@ def run_live_trading_engine(stop_event, sheet_id, nifty_exp, bn_exp):
                 return
             time.sleep(1)
 
-        for und in UNDERLYING_INDICES:
+        # ── Parallel execution of NIFTY and BANKNIFTY ──
+        def safe_evaluate(und):
             try:
                 evaluate_candle(
                     smart, lookups[und], gc, sh, und,
                     INDEX_PARAMS[und]["token"], INDEX_PARAMS[und]["strike_step"],
-                    expiries[und], active_positions, daily_trade_counts, last_processed, trading_date
+                    INDEX_PARAMS[und]["expiry"], active_positions, daily_trade_counts, last_processed, trading_date
                 )
             except Exception as e:
                 logging.error(f"Error evaluating {und}: {e}")
 
-# ─── 7. BACKTEST ENGINE ───
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            concurrent.futures.wait([executor.submit(safe_evaluate, und) for und in UNDERLYING_INDICES])
+
+# ─── 8. BACKTEST SUITE ENGINE ───
 def apply_slippage(action, price):
     if not ENABLE_TRANSACTION_COSTS or SLIPPAGE_PCT == 0:
         return price, 0.0
@@ -675,16 +667,15 @@ def compute_charges(action, price, qty):
     stamp = turnover * STAMP_DUTY_PCT if action == "BUY" else 0.0
     return round(brokerage + stt + exchange + gst + sebi + stamp, 2)
 
-def run_backtest_suite(underlying, trade_date, expiry_date, sheet_id):
+def run_backtest_suite(underlying, trade_date, expiry_date):
     smart = login()
-    gc = get_sheet_client()
-    sh = gc.open_by_key(sheet_id)
     lookup = build_instrument_lookup(underlying)
 
-    token = INDEX_PARAMS[underlying]["token"]
-    lot_size = INDEX_PARAMS[underlying]["lot_size"]
-    strike_step = INDEX_PARAMS[underlying]["strike_step"]
-    loxx_mult = INDEX_PARAMS[underlying]["loxx_mult"]
+    config = INDEX_PARAMS[underlying]
+    token = config["token"]
+    lot_size = config["lot_size"]
+    strike_step = config["strike_step"]
+    loxx_mult = config["loxx_mult"]
 
     warmup_from = dt.datetime.combine(trade_date - dt.timedelta(days=INDICATOR_WARMUP_DAYS), MARKET_OPEN)
     day_to = dt.datetime.combine(trade_date, MARKET_CLOSE)
@@ -717,7 +708,6 @@ def run_backtest_suite(underlying, trade_date, expiry_date, sheet_id):
             if t > dt.time(15, 10):
                 break
 
-            # Exit logic
             if position is not None:
                 opt_df = position["opt_df"]
                 matching_candle = opt_df[opt_df["timestamp"] == ts]
@@ -760,7 +750,6 @@ def run_backtest_suite(underlying, trade_date, expiry_date, sheet_id):
                         })
                         position = None
 
-            # Entry logic
             can_enter = (position is None) and (trades_count < MAX_TRADES_PER_DAY) and (ENTRY_WINDOW_START <= t <= ENTRY_WINDOW_END)
             if can_enter:
                 kc_up, kc_basis, kc_low, kc_basis_prev = row["kc_upper"], row["kc_basis"], row["kc_lower"], row["kc_basis_prev"]
@@ -830,40 +819,39 @@ def run_backtest_suite(underlying, trade_date, expiry_date, sheet_id):
 
     return pd.DataFrame(summary_rows), all_trades_results
 
-# ─── 8. USER INTERFACE & CONTROLS ───
+# ─── 9. USER INTERFACE ───
 if "bot_thread" not in st.session_state: st.session_state.bot_thread = None
 if "stop_event" not in st.session_state: st.session_state.stop_event = threading.Event()
 if "is_running" not in st.session_state: st.session_state.is_running = False
 
 st.title("📈 Pro Momentum Engine (v7.3 Hybrid)")
 
-tab_live, tab_backtest, tab_config = st.tabs(["🔴 Live Trading", "🧪 Backtesting Suite", "⚙️ Configuration"])
+tab_live, tab_backtest = st.tabs(["🔴 Live Trading", "🧪 Multi-Strategy Backtest"])
 
 # ── Tab 1: Live Trading ──
 with tab_live:
-    st.subheader("Live Engine Execution (Paper Trading)")
-    col1, col2 = st.columns(2)
-    with col1:
-        live_nifty_exp = st.date_input("NIFTY Expiry Date", value=dt.date(2026, 9, 1), key="live_n_exp")
-    with col2:
-        live_bn_exp = st.date_input("BANKNIFTY Expiry Date", value=dt.date(2026, 9, 29), key="live_bn_exp")
+    st.subheader("Live Paper-Trading Engine")
+    met_col1, met_col2, met_col3, met_col4 = st.columns(4)
+    met_col1.metric("NIFTY Expiry", nifty_expiry.strftime("%d %b %Y"))
+    met_col2.metric("NIFTY Loxx Mult", nifty_loxx)
+    met_col3.metric("BANKNIFTY Expiry", bn_expiry.strftime("%d %b %Y"))
+    met_col4.metric("BANKNIFTY Loxx Mult", bn_loxx)
 
     st.divider()
 
     if not st.session_state.is_running:
-        if st.button("▶️ Start Live Engine (v7.3)", use_container_width=True, type="primary"):
+        if st.button("▶️ Start Live Engine (Parallel Threads)", use_container_width=True, type="primary"):
             st.session_state.stop_event.clear()
-            sheet_id = st.session_state.get("sheet_id", "1tiVgr1CdbKVrnf-HJM1cVDYy8ltrLo6VnRaTK9IJn_4")
             st.session_state.bot_thread = threading.Thread(
                 target=run_live_trading_engine,
-                args=(st.session_state.stop_event, sheet_id, live_nifty_exp, live_bn_exp),
+                args=(st.session_state.stop_event, sheet_id_input),
                 daemon=True
             )
             st.session_state.bot_thread.start()
             st.session_state.is_running = True
             st.rerun()
     else:
-        st.success("🟢 Engine is active. Double-fetch candle stability and state recovery are running.")
+        st.success("🟢 Live Engine is actively monitoring NIFTY & BANKNIFTY in parallel.")
         if st.button("⏹️ Stop Live Engine", use_container_width=True):
             st.session_state.stop_event.set()
             st.session_state.bot_thread.join(timeout=5)
@@ -872,22 +860,23 @@ with tab_live:
 
 # ── Tab 2: Backtesting ──
 with tab_backtest:
-    st.subheader("Multi-Strategy Backtest Engine")
+    st.subheader("Multi-Strategy Quant Backtester")
     bt_col1, bt_col2, bt_col3 = st.columns(3)
     with bt_col1:
         bt_und = st.selectbox("Underlying Index", ["NIFTY", "BANKNIFTY"], key="bt_und_sel")
     with bt_col2:
         bt_date = st.date_input("Trade Date", value=dt.date(2026, 8, 27), key="bt_trade_date")
     with bt_col3:
-        bt_exp = st.date_input("Option Expiry Date", value=dt.date(2026, 9, 1) if bt_und == "NIFTY" else dt.date(2026, 9, 29), key="bt_opt_exp")
+        bt_exp = st.date_input("Option Expiry Date", value=INDEX_PARAMS[bt_und]["expiry"], key="bt_opt_exp")
 
-    if st.button("🚀 Run Backtest Suite (Spot 13 vs Prem 13/15/21 EMA)", use_container_width=True):
-        with st.spinner("Fetching candles and computing multi-strategy backtest..."):
+    st.caption(f"Testing {bt_und} using Sidebar Loxx Multiplier: **{INDEX_PARAMS[bt_und]['loxx_mult']}**")
+
+    if st.button("🚀 Run Multi-Strategy Backtest", use_container_width=True):
+        with st.spinner(f"Fetching candles and running backtests for {bt_und}..."):
             try:
-                sheet_id = st.session_state.get("sheet_id", "1X9pcz5Cgj697wPgRjSBu-DescbaZkq_KLw6xrpw8vJE")
-                summary_df, trades_dict = run_backtest_suite(bt_und, bt_date, bt_exp, sheet_id)
-
+                summary_df, trades_dict = run_backtest_suite(bt_und, bt_date, bt_exp)
                 st.success("✅ Backtest run completed successfully!")
+
                 st.write("### Strategy Performance Summary")
                 st.dataframe(summary_df, use_container_width=True)
 
@@ -903,10 +892,3 @@ with tab_backtest:
                             st.info(f"No trades generated under {key}.")
             except Exception as e:
                 st.error(f"Backtest error: {e}")
-
-# ── Tab 3: Configuration ──
-with tab_config:
-    st.subheader("System Configuration")
-    sheet_id_input = st.text_input("Google Sheet ID", value="1X9pcz5Cgj697wPgRjSBu-DescbaZkq_KLw6xrpw8vJE")
-    st.session_state["sheet_id"] = sheet_id_input
-    st.info("The Sheet ID will be used across Live Trading, State Recovery, and Backtest logging.")
