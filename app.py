@@ -36,7 +36,7 @@ INTERVAL = "THREE_MINUTE"
 INDICATOR_WARMUP_DAYS = 5
 
 INDEX_PARAMS = {
-    "NIFTY": {"token": "99926000", "strike_step": 50, "lot_size": 65, "loxx_mult": 0.9, "exit_mode": "SPOT_EMA"},
+    "NIFTY": {"token": "99926000", "strike_step": 50, "lot_size": 65, "loxx_mult": 1.0, "exit_mode": "SPOT_EMA"},
     "BANKNIFTY": {"token": "99926009", "strike_step": 100, "lot_size": 15, "loxx_mult": 1.0, "exit_mode": "SPOT_EMA"}
 }
 
