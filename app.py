@@ -42,7 +42,8 @@ CLIENT_ID = get_secret("CLIENT_ID", "Masked")
 PASSWORD = get_secret("PASSWORD", "Masked")
 TOTP_SECRET = get_secret("TOTP_SECRET", "Masked")
 
-GOOGLE_SHEET_ID = get_secret("GOOGLE_SHEET_ID", "1tiVgr1CdbKVrnf-HJM1cVDYy8ltrLo6VnRaTK9IJn_4")
+# Sheet ID requested by user
+GOOGLE_SHEET_ID = get_secret("GOOGLE_SHEET_ID", "1X9pcz5Cgj697wPgRjSBu-DescbaZkq_KLw6xrpw8vJE")
 GOOGLE_SERVICE_ACCOUNT_JSON = "service_account.json"
 
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", "8981928115:AAEtIU9VAix-mwD52zis38Wql4eD8kLEKcI")
@@ -67,6 +68,7 @@ LOXX_DEV = 1.0
 # ── Execution Settings ──
 DATA_FRESHNESS_RETRIES = 8
 DATA_FRESHNESS_RETRY_DELAY = 15
+CANDLE_STABILITY_CHECK_DELAY = 10
 
 STOP_LOSS_PCT = 10.0
 MAX_TRADES_PER_DAY = 3
@@ -396,26 +398,61 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
     config = INDEX_PARAMS[underlying]
     expected_ts = expected_latest_candle_ts(now)
 
-    row = None
+    is_settled = False
+    settled_row = None
+
+    # ── EXACT TIMESTAMP MATCH + DOUBLE FETCH STABILITY CHECK ──
     for attempt in range(1, DATA_FRESHNESS_RETRIES + 1):
         spot_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NSE", interval=INTERVAL)
         if spot_df.empty:
             time.sleep(DATA_FRESHNESS_RETRY_DELAY)
+            now = get_ist_now()
+            expected_ts = expected_latest_candle_ts(now)
             continue
+
         day_df = add_intraday_indicators(spot_df)
         day_df = day_df[day_df["timestamp"].dt.date == trading_date].reset_index(drop=True)
 
         target_row = day_df[day_df["timestamp"] == expected_ts]
-        if not target_row.empty:
-            row = target_row.iloc[0]
-            break
-        time.sleep(DATA_FRESHNESS_RETRY_DELAY)
+        if target_row.empty:
+            logging.warning(f"[{underlying}] Candle {expected_ts.strftime('%H:%M')} not found. Attempt {attempt}/{DATA_FRESHNESS_RETRIES}")
+            time.sleep(DATA_FRESHNESS_RETRY_DELAY)
+            now = get_ist_now()
+            expected_ts = expected_latest_candle_ts(now)
+            continue
 
-    if row is None:
-        logging.error(f"[{underlying}] Candle {expected_ts.strftime('%H:%M')} not found after {DATA_FRESHNESS_RETRIES} retries.")
+        candidate = target_row.iloc[0]
+        time.sleep(CANDLE_STABILITY_CHECK_DELAY)
+        
+        recheck_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), get_ist_now(), exchange="NSE", interval=INTERVAL)
+        if not recheck_df.empty:
+            recheck_day_df = add_intraday_indicators(recheck_df)
+            recheck_day_df = recheck_day_df[recheck_day_df["timestamp"].dt.date == trading_date].reset_index(drop=True)
+            match = recheck_day_df[recheck_day_df["timestamp"] == expected_ts]
+            
+            if not match.empty:
+                m = match.iloc[0]
+                if (m["open"] == candidate["open"] and m["high"] == candidate["high"] and 
+                    m["low"] == candidate["low"] and m["close"] == candidate["close"]):
+                    is_settled = True
+                    settled_row = m
+                    break
+                else:
+                    logging.warning(f"[{underlying}] Candle {expected_ts.strftime('%H:%M')} revising OHLC — waiting to settle...")
+            else:
+                logging.warning(f"[{underlying}] Candle disappeared on recheck.")
+        
+        time.sleep(DATA_FRESHNESS_RETRY_DELAY)
+        now = get_ist_now()
+        expected_ts = expected_latest_candle_ts(now)
+
+    if not is_settled or settled_row is None:
+        logging.error(f"[{underlying}] Giving up this cycle — candle data still not synced/settled.")
         return
 
+    row = settled_row
     ts, t = row["timestamp"], row["timestamp"].time()
+
     if last_processed.get(underlying) == ts:
         return
     last_processed[underlying] = ts
@@ -593,8 +630,6 @@ def run_live_trading_engine(stop_event, sheet_id):
     daily_trade_counts = {"NIFTY": 0, "BANKNIFTY": 0}
     last_processed = {"NIFTY": None, "BANKNIFTY": None}
 
-    send_telegram_alert("🚀 *Pro Momentum Engine v7.3 Started*\nMonitoring NIFTY & BANKNIFTY.")
-
     try:
         smart = login()
         gc = get_sheet_client()
@@ -612,6 +647,8 @@ def run_live_trading_engine(stop_event, sheet_id):
         send_telegram_alert(f"⚠️ *Startup Failure:* {e}")
         return
 
+    send_telegram_alert("🚀 *Pro Engine v7.3 Started*")
+
     while not stop_event.is_set():
         now = get_ist_now()
         current_time = now.time()
@@ -624,8 +661,7 @@ def run_live_trading_engine(stop_event, sheet_id):
             break
 
         seconds_until_next_candle = (3 - (now.minute % 3)) * 60 - now.second
-        if seconds_until_next_candle <= 0:
-            seconds_until_next_candle = 180
+        if seconds_until_next_candle <= 0: seconds_until_next_candle = 180
 
         sleep_end = now + dt.timedelta(seconds=seconds_until_next_candle + 2)
         while get_ist_now() < sleep_end:
@@ -634,16 +670,10 @@ def run_live_trading_engine(stop_event, sheet_id):
                 return
             time.sleep(1)
 
-        # ── Parallel execution of NIFTY and BANKNIFTY ──
+        # ── CONCURRENCY: Nifty and BankNifty fetch and evaluate simultaneously ──
         def safe_evaluate(und):
-            try:
-                evaluate_candle(
-                    smart, lookups[und], gc, sh, und,
-                    INDEX_PARAMS[und]["token"], INDEX_PARAMS[und]["strike_step"],
-                    INDEX_PARAMS[und]["expiry"], active_positions, daily_trade_counts, last_processed, trading_date
-                )
-            except Exception as e:
-                logging.error(f"Error evaluating {und}: {e}")
+            try: evaluate_candle(smart, lookups[und], gc, sh, und, INDEX_PARAMS[und]["token"], INDEX_PARAMS[und]["strike_step"], INDEX_PARAMS[und]["expiry"], active_positions, daily_trade_counts, last_processed, trading_date)
+            except Exception as e: logging.error(f"Error {und}: {e}")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             concurrent.futures.wait([executor.submit(safe_evaluate, und) for und in UNDERLYING_INDICES])
@@ -713,8 +743,7 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
                 matching_candle = opt_df[opt_df["timestamp"] == ts]
                 if not matching_candle.empty:
                     current_price = matching_candle.iloc[0]["close"]
-                    entry_price = position["entry_price"]
-                    pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+                    pnl_pct = ((current_price - position["entry_price"]) / position["entry_price"]) * 100.0
 
                     exit_reason = None
                     if pnl_pct <= -STOP_LOSS_PCT:
@@ -819,76 +848,49 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
 
     return pd.DataFrame(summary_rows), all_trades_results
 
-# ─── 9. USER INTERFACE ───
+# ─── 9. STREAMLIT DASHBOARD TABS ───
 if "bot_thread" not in st.session_state: st.session_state.bot_thread = None
 if "stop_event" not in st.session_state: st.session_state.stop_event = threading.Event()
 if "is_running" not in st.session_state: st.session_state.is_running = False
 
 st.title("📈 Pro Momentum Engine (v7.3 Hybrid)")
+tab_live, tab_backtest = st.tabs(["🔴 Live Trading", "🧪 Dynamic Backtest"])
 
-tab_live, tab_backtest = st.tabs(["🔴 Live Trading", "🧪 Multi-Strategy Backtest"])
-
-# ── Tab 1: Live Trading ──
 with tab_live:
-    st.subheader("Live Paper-Trading Engine")
-    met_col1, met_col2, met_col3, met_col4 = st.columns(4)
-    met_col1.metric("NIFTY Expiry", nifty_expiry.strftime("%d %b %Y"))
-    met_col2.metric("NIFTY Loxx Mult", nifty_loxx)
-    met_col3.metric("BANKNIFTY Expiry", bn_expiry.strftime("%d %b %Y"))
-    met_col4.metric("BANKNIFTY Loxx Mult", bn_loxx)
-
-    st.divider()
-
     if not st.session_state.is_running:
-        if st.button("▶️ Start Live Engine (Parallel Threads)", use_container_width=True, type="primary"):
+        if st.button("▶️ Start Live Engine (Parallel Threads)", type="primary"):
             st.session_state.stop_event.clear()
-            st.session_state.bot_thread = threading.Thread(
-                target=run_live_trading_engine,
-                args=(st.session_state.stop_event, sheet_id_input),
-                daemon=True
-            )
+            st.session_state.bot_thread = threading.Thread(target=run_live_trading_engine, args=(st.session_state.stop_event, sheet_id_input), daemon=True)
             st.session_state.bot_thread.start()
             st.session_state.is_running = True
             st.rerun()
     else:
-        st.success("🟢 Live Engine is actively monitoring NIFTY & BANKNIFTY in parallel.")
-        if st.button("⏹️ Stop Live Engine", use_container_width=True):
+        st.success("🟢 Engine is active. NIFTY and BANKNIFTY are evaluating concurrently with exact timestamp matching.")
+        if st.button("⏹️ Stop Live Engine"):
             st.session_state.stop_event.set()
             st.session_state.bot_thread.join(timeout=5)
             st.session_state.is_running = False
             st.rerun()
 
-# ── Tab 2: Backtesting ──
 with tab_backtest:
-    st.subheader("Multi-Strategy Quant Backtester")
-    bt_col1, bt_col2, bt_col3 = st.columns(3)
-    with bt_col1:
-        bt_und = st.selectbox("Underlying Index", ["NIFTY", "BANKNIFTY"], key="bt_und_sel")
-    with bt_col2:
-        bt_date = st.date_input("Trade Date", value=dt.date(2026, 8, 27), key="bt_trade_date")
-    with bt_col3:
-        bt_exp = st.date_input("Option Expiry Date", value=INDEX_PARAMS[bt_und]["expiry"], key="bt_opt_exp")
-
-    st.caption(f"Testing {bt_und} using Sidebar Loxx Multiplier: **{INDEX_PARAMS[bt_und]['loxx_mult']}**")
-
-    if st.button("🚀 Run Multi-Strategy Backtest", use_container_width=True):
-        with st.spinner(f"Fetching candles and running backtests for {bt_und}..."):
+    st.markdown("**Note:** Changing the Loxx Multiplier in the sidebar instantly applies to this backtest.")
+    bt_und = st.selectbox("Index", ["NIFTY", "BANKNIFTY"])
+    bt_date = st.date_input("Trade Date", value=dt.date(2026, 8, 27))
+    if st.button("🚀 Run Backtest with Sidebar Parameters"):
+        with st.spinner(f"Running {bt_und} backtest at Loxx {INDEX_PARAMS[bt_und]['loxx_mult']}..."):
             try:
-                summary_df, trades_dict = run_backtest_suite(bt_und, bt_date, bt_exp)
-                st.success("✅ Backtest run completed successfully!")
-
-                st.write("### Strategy Performance Summary")
-                st.dataframe(summary_df, use_container_width=True)
-
-                st.write("### Strategy Trade Logs")
-                t_tabs = st.tabs(["Spot 13 EMA", "Prem 13 EMA", "Prem 15 EMA", "Prem 21 EMA"])
-                strat_keys = ["SPOT_13_EMA", "PREM_13_EMA", "PREM_15_EMA", "PREM_21_EMA"]
-                for i, key in enumerate(strat_keys):
-                    with t_tabs[i]:
-                        df_res = trades_dict[key]
-                        if not df_res.empty:
-                            st.dataframe(df_res, use_container_width=True)
-                        else:
-                            st.info(f"No trades generated under {key}.")
+                res_df, trades_dict = run_backtest_suite(bt_und, bt_date, INDEX_PARAMS[bt_und]["expiry"])
+                if not res_df.empty: 
+                    st.dataframe(res_df, use_container_width=True)
+                    st.write("### Strategy Trade Logs")
+                    t_tabs = st.tabs(["Spot 13 EMA", "Prem 13 EMA", "Prem 15 EMA", "Prem 21 EMA"])
+                    strat_keys = ["SPOT_13_EMA", "PREM_13_EMA", "PREM_15_EMA", "PREM_21_EMA"]
+                    for i, key in enumerate(strat_keys):
+                        with t_tabs[i]:
+                            df_res = trades_dict[key]
+                            if not df_res.empty: st.dataframe(df_res, use_container_width=True)
+                            else: st.info(f"No trades generated under {key}.")
+                else: 
+                    st.info("No trades triggered for these parameters.")
             except Exception as e:
-                st.error(f"Backtest error: {e}")
+                st.error(f"Backtest execution failed: {e}")
