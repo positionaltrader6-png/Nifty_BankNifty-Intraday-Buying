@@ -317,7 +317,7 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
         logging.error(f"[{underlying}] Giving up this cycle — candle data still not synced.")
         return
 
-    # Direct iloc[-2] lookup. No stability checks, no double fetching.
+    # Direct iloc[-2] lookup without double fetch loop
     row = day_df.iloc[-2]
     ts, t = row["timestamp"], row["timestamp"].time()
 
@@ -605,7 +605,7 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
 
                 if signal:
                     atm_strike = int(round(close / config["strike_step"]) * config["strike_step"])
-                    sym, tok = fetch_option_token(lookup, underlying, config["expiry"], atm_strike, signal)
+                    sym, tok = fetch_option_token(lookup, underlying, expiry_date, atm_strike, signal)
                     if tok:
                         if tok not in option_cache:
                             opt_df, smart = get_candles_with_relogin(smart, tok, warmup_from, day_to, exchange="NFO", interval=INTERVAL)
@@ -632,7 +632,7 @@ tab_live, tab_backtest = st.tabs(["🔴 Live Trading", "🧪 Dynamic Backtest"])
 
 with tab_live:
     if not st.session_state.is_running:
-        if st.button("▶️ Start Live Engine (Parallel Threads)", type="primary"):
+        if st.button("▶️ Start Live Engine", type="primary", width="stretch"):
             st.session_state.stop_event.clear()
             st.session_state.bot_thread = threading.Thread(target=run_live_trading_engine, args=(st.session_state.stop_event, sheet_id_input), daemon=True)
             st.session_state.bot_thread.start()
@@ -640,7 +640,7 @@ with tab_live:
             st.rerun()
     else:
         st.success("🟢 Engine is active. NIFTY and BANKNIFTY are evaluating concurrently.")
-        if st.button("⏹️ Stop Live Engine"):
+        if st.button("⏹️ Stop Live Engine", width="stretch"):
             st.session_state.stop_event.set()
             st.session_state.bot_thread.join(timeout=5)
             st.session_state.is_running = False
@@ -650,19 +650,19 @@ with tab_backtest:
     st.markdown("**Note:** Changing the Loxx Multiplier in the sidebar instantly applies to this backtest.")
     bt_und = st.selectbox("Index", ["NIFTY", "BANKNIFTY"])
     bt_date = st.date_input("Trade Date", value=dt.date(2026, 8, 27))
-    if st.button("🚀 Run Backtest with Sidebar Parameters"):
+    if st.button("🚀 Run Backtest with Sidebar Parameters", width="stretch"):
         with st.spinner(f"Running {bt_und} backtest at Loxx {INDEX_PARAMS[bt_und]['loxx_mult']}..."):
             try:
                 res_df, trades_dict = run_backtest_suite(bt_und, bt_date, INDEX_PARAMS[bt_und]["expiry"])
                 if not res_df.empty: 
-                    st.dataframe(res_df, use_container_width=True)
+                    st.dataframe(res_df, width="stretch")
                     st.write("### Strategy Trade Logs")
                     t_tabs = st.tabs(["Spot 13 EMA", "Prem 13 EMA", "Prem 15 EMA", "Prem 21 EMA"])
                     strat_keys = ["SPOT_13_EMA", "PREM_13_EMA", "PREM_15_EMA", "PREM_21_EMA"]
                     for i, key in enumerate(strat_keys):
                         with t_tabs[i]:
                             df_res = trades_dict[key]
-                            if not df_res.empty: st.dataframe(df_res, use_container_width=True)
+                            if not df_res.empty: st.dataframe(df_res, width="stretch")
                             else: st.info(f"No trades generated under {key}.")
                 else: 
                     st.info("No trades triggered for these parameters.")
