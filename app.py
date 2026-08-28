@@ -21,7 +21,7 @@ from google.oauth2.service_account import Credentials
 
 
 # ─── 1. PAGE SETUP & GLOBAL CONFIG ───
-st.set_page_config(page_title="Pro Momentum Engine v7.4", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Intraday Buying", page_icon="📈", layout="wide")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", force=True)
 
 
