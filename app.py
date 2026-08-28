@@ -936,7 +936,7 @@ tab_live, tab_backtest = st.tabs(["🔴 Live Trading", "🧪 Dynamic Backtest"])
 with tab_live:
     st.subheader("Live Execution Control Center")
     if not st.session_state.is_running:
-        if st.button("▶️ Start Live Engine (NIFTY Only)", type="primary", width="stretch"):
+        if st.button("▶️ Start Live Trading", type="primary", width="stretch"):
             st.session_state.stop_event.clear()
             st.session_state.bot_thread = threading.Thread(target=run_live_trading_engine, args=(st.session_state.stop_event, sheet_id_input), daemon=True)
             st.session_state.bot_thread.start()
@@ -944,7 +944,7 @@ with tab_live:
             st.rerun()
     else:
         st.success("🟢 Engine is active. Live tracking is currently restricted to NIFTY.")
-        if st.button("⏹️ Stop Live Engine", width="stretch"):
+        if st.button("⏹️ Stop Live Trading", width="stretch"):
             st.session_state.stop_event.set()
             st.session_state.bot_thread.join(timeout=5)
             st.session_state.is_running = False
