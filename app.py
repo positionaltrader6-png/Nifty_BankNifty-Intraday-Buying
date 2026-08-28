@@ -2,13 +2,6 @@
 ================================================================================
 Intraday Option BUYING — Streamlit Live Engine & Backtesting Suite (v7.3 Hybrid)
 ================================================================================
-Features:
-1. Live Trading Engine: Parallel evaluation of NIFTY & BANKNIFTY via ThreadPoolExecutor.
-2. Direct Fetch Logic: Matches the verified iloc[-2] fetching from the standalone .py script.
-3. State Recovery & Sheet Persistence: Open_Positions tab tracking across restarts.
-4. Multi-Strategy Backtesting Suite: Spot 13 EMA, Premium 13/15/21 EMA exits.
-5. Dynamic Sidebar Configuration: Expiries and Loxx Multipliers adjustable in real-time.
-================================================================================
 """
 
 import streamlit as st
@@ -33,6 +26,7 @@ IST = pytz.timezone("Asia/Kolkata")
 def get_ist_now():
     return dt.datetime.now(IST).replace(tzinfo=None)
 
+# ── API Credentials ──
 def get_secret(key, default=""):
     return st.secrets.get(key, default) if hasattr(st, "secrets") else default
 
@@ -51,11 +45,13 @@ UNDERLYING_INDICES = ["NIFTY", "BANKNIFTY"]
 INTERVAL = "THREE_MINUTE"
 INDICATOR_WARMUP_DAYS = 5
 
+# ── Indicator Parameters ──
 KC_PERIOD, KC_ATR_MULT = 20, 1.0
 EMA_FAST, EMA_SLOW, EMA_SL_PERIOD = 9, 21, 13
 ADX_PERIOD, ADX_MIN, CHOP_PERIOD = 14, 20.0, 14
 LOXX_PERIOD, LOXX_DEV = 40, 1.0
 
+# ── Execution Settings ──
 DATA_FRESHNESS_RETRIES = 3
 DATA_FRESHNESS_RETRY_DELAY = 5
 
@@ -67,10 +63,15 @@ EOD_EXIT_TIME = dt.time(15, 0)
 MARKET_OPEN = dt.time(9, 15)
 MARKET_CLOSE = dt.time(15, 30)
 
+# ── Costs & Slippage (NSE Options) ──
 ENABLE_TRANSACTION_COSTS = True
 BROKERAGE_PER_ORDER = 20.0
-STT_SELL_PCT, EXCHANGE_TXN_PCT, GST_PCT = 0.0625 / 100, 0.03503 / 100, 18.0 / 100
-SEBI_CHARGES_PCT, STAMP_DUTY_PCT, SLIPPAGE_PCT = 0.0001 / 100, 0.003 / 100, 0.10 / 100
+STT_SELL_PCT = 0.0625 / 100
+EXCHANGE_TXN_PCT = 0.03503 / 100
+GST_PCT = 18.0 / 100
+SEBI_CHARGES_PCT = 0.0001 / 100
+STAMP_DUTY_PCT = 0.003 / 100
+SLIPPAGE_PCT = 0.10 / 100
 
 INSTRUMENT_MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 INSTRUMENT_MASTER_URL_FALLBACK = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -304,7 +305,6 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
 
     if len(day_df) < 2:
         for fresh_attempt in range(1, DATA_FRESHNESS_RETRIES + 1):
-            logging.warning(f"[{underlying}] Only {len(day_df)} candle(s) for today (attempt {fresh_attempt}/{DATA_FRESHNESS_RETRIES}) — retrying in {DATA_FRESHNESS_RETRY_DELAY}s...")
             time.sleep(DATA_FRESHNESS_RETRY_DELAY)
             now = get_ist_now()
             spot_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NSE", interval=INTERVAL)
@@ -317,7 +317,7 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
         logging.error(f"[{underlying}] Giving up this cycle — candle data still not synced.")
         return
 
-    # ── Using EXACT logic from live_engine_v73-10_2.py ──
+    # Direct iloc[-2] lookup. No stability checks, no double fetching.
     row = day_df.iloc[-2]
     ts, t = row["timestamp"], row["timestamp"].time()
 
@@ -605,7 +605,7 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
 
                 if signal:
                     atm_strike = int(round(close / config["strike_step"]) * config["strike_step"])
-                    sym, tok = fetch_option_token(lookup, underlying, expiry_date, atm_strike, signal)
+                    sym, tok = fetch_option_token(lookup, underlying, config["expiry"], atm_strike, signal)
                     if tok:
                         if tok not in option_cache:
                             opt_df, smart = get_candles_with_relogin(smart, tok, warmup_from, day_to, exchange="NFO", interval=INTERVAL)
