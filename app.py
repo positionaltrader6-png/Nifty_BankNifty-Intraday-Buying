@@ -327,7 +327,7 @@ def add_intraday_indicators(df):
     df["adx_prev"], df["adxr_prev"], df["chop_prev"] = df["adx"].shift(1), df["adxr"].shift(1), df["chop"].shift(1)
     return df
 
-# ─── 6. LIVE EVALUATION & EXECUTION LOGIC (Exact refined script) ───
+# ─── 6. LIVE EVALUATION & EXECUTION LOGIC ───
 def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strike_step, expiry_date, active_positions, daily_trade_counts, last_processed, trading_date):
     day_from = dt.datetime.combine(trading_date, MARKET_OPEN)
     now = get_ist_now()
@@ -556,9 +556,9 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                 "latest_opt_price": entry_price,
                 "latest_opt_sl": opt_ema_sl,
                 "last_alerted_sl": ema_sl if config["exit_mode"] == "SPOT_EMA" else opt_ema_sl,
-                "trade_sheet": make_trade_sheet_name(underlying, daily_trade_counts[underlying])
+                "trade_sheet": make_trade_sheet_name(underlying, daily_trade_counts[underlying], trading_date)
             }
-            save_open_position_to_sheet(sh, underlying, active_positions[underlying])
+            save_open_position_to_sheet(sh, underlying, active_positions[underlying], trading_date)
             log_trade_event(
                 sh, active_positions[underlying]["trade_sheet"], "ENTRY",
                 close, entry_price, ema_sl, opt_ema_sl, 0.0, notes=signal
@@ -832,14 +832,16 @@ with tab_live:
 
 with tab_backtest:
     st.subheader("Multi-Strategy Backtesting Suite")
-    st.markdown("**Note:** Changing the Loxx Multiplier in the sidebar instantly applies to this backtest.")
+    st.markdown("**Note:** Changing the index automatically updates the default expiry and applies your sidebar Loxx Multiplier.")
+    
     bt_col1, bt_col2, bt_col3 = st.columns(3)
     with bt_col1:
         bt_und = st.selectbox("Underlying Index", ["NIFTY", "BANKNIFTY"], key="bt_und_sel")
     with bt_col2:
         bt_date = st.date_input("Trade Date", value=dt.date(2026, 8, 27), key="bt_trade_date")
     with bt_col3:
-        bt_exp = st.date_input("Option Expiry Date", value=INDEX_PARAMS[bt_und]["expiry"], key="bt_opt_exp")
+        default_exp = dt.date(2026, 9, 1) if bt_und == "NIFTY" else dt.date(2026, 9, 29)
+        bt_exp = st.date_input("Option Expiry Date", value=default_exp, key="bt_opt_exp")
 
     if st.button("🚀 Run Backtest with Sidebar Parameters", width="stretch"):
         with st.spinner(f"Running {bt_und} backtest at Loxx {INDEX_PARAMS[bt_und]['loxx_mult']}..."):
@@ -858,6 +860,6 @@ with tab_backtest:
                             else:
                                 st.info(f"No trades generated under {key}.")
                 else:
-                    st.info("No trades triggered for these parameters.")
+                    st.info("No trades triggered for these parameters. Try adjusting your Loxx multiplier or check if options data exists for this expiry.")
             except Exception as e:
                 st.error(f"Backtest execution failed: {e}")
