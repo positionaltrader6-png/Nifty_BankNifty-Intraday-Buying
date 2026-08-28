@@ -4,7 +4,7 @@ Intraday Option BUYING — Streamlit Live Engine & Backtesting Suite (v7.3 Hybri
 ================================================================================
 Features:
 1. Live Trading Engine: Parallel evaluation of NIFTY & BANKNIFTY via ThreadPoolExecutor.
-2. Zero-Lag Candle Alignment: Exact timestamp matching to eliminate forming-candle glitches.
+2. Direct Fetch Logic: Matches the verified iloc[-2] fetching from the standalone .py script.
 3. State Recovery & Sheet Persistence: Open_Positions tab tracking across restarts.
 4. Multi-Strategy Backtesting Suite: Spot 13 EMA, Premium 13/15/21 EMA exits.
 5. Dynamic Sidebar Configuration: Expiries and Loxx Multipliers adjustable in real-time.
@@ -33,7 +33,6 @@ IST = pytz.timezone("Asia/Kolkata")
 def get_ist_now():
     return dt.datetime.now(IST).replace(tzinfo=None)
 
-# ── API Credentials (Read from st.secrets or fallback to configuration) ──
 def get_secret(key, default=""):
     return st.secrets.get(key, default) if hasattr(st, "secrets") else default
 
@@ -42,7 +41,6 @@ CLIENT_ID = get_secret("CLIENT_ID", "Masked")
 PASSWORD = get_secret("PASSWORD", "Masked")
 TOTP_SECRET = get_secret("TOTP_SECRET", "Masked")
 
-# Sheet ID requested by user
 GOOGLE_SHEET_ID = get_secret("GOOGLE_SHEET_ID", "1X9pcz5Cgj697wPgRjSBu-DescbaZkq_KLw6xrpw8vJE")
 GOOGLE_SERVICE_ACCOUNT_JSON = "service_account.json"
 
@@ -53,22 +51,13 @@ UNDERLYING_INDICES = ["NIFTY", "BANKNIFTY"]
 INTERVAL = "THREE_MINUTE"
 INDICATOR_WARMUP_DAYS = 5
 
-# ── Indicator Parameters ──
-KC_PERIOD = 20
-KC_ATR_MULT = 1.0
-EMA_FAST = 9
-EMA_SLOW = 21
-EMA_SL_PERIOD = 13
-ADX_PERIOD = 14
-ADX_MIN = 20.0
-CHOP_PERIOD = 14
-LOXX_PERIOD = 40
-LOXX_DEV = 1.0
+KC_PERIOD, KC_ATR_MULT = 20, 1.0
+EMA_FAST, EMA_SLOW, EMA_SL_PERIOD = 9, 21, 13
+ADX_PERIOD, ADX_MIN, CHOP_PERIOD = 14, 20.0, 14
+LOXX_PERIOD, LOXX_DEV = 40, 1.0
 
-# ── Execution Settings ──
-DATA_FRESHNESS_RETRIES = 8
-DATA_FRESHNESS_RETRY_DELAY = 15
-CANDLE_STABILITY_CHECK_DELAY = 10
+DATA_FRESHNESS_RETRIES = 3
+DATA_FRESHNESS_RETRY_DELAY = 5
 
 STOP_LOSS_PCT = 10.0
 MAX_TRADES_PER_DAY = 3
@@ -78,41 +67,18 @@ EOD_EXIT_TIME = dt.time(15, 0)
 MARKET_OPEN = dt.time(9, 15)
 MARKET_CLOSE = dt.time(15, 30)
 
-# ── Costs & Slippage (NSE Options) ──
 ENABLE_TRANSACTION_COSTS = True
 BROKERAGE_PER_ORDER = 20.0
-STT_SELL_PCT = 0.0625 / 100
-EXCHANGE_TXN_PCT = 0.03503 / 100
-GST_PCT = 18.0 / 100
-SEBI_CHARGES_PCT = 0.0001 / 100
-STAMP_DUTY_PCT = 0.003 / 100
-SLIPPAGE_PCT = 0.10 / 100
+STT_SELL_PCT, EXCHANGE_TXN_PCT, GST_PCT = 0.0625 / 100, 0.03503 / 100, 18.0 / 100
+SEBI_CHARGES_PCT, STAMP_DUTY_PCT, SLIPPAGE_PCT = 0.0001 / 100, 0.003 / 100, 0.10 / 100
 
 INSTRUMENT_MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 INSTRUMENT_MASTER_URL_FALLBACK = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
 
-HEARTBEAT_HEADERS = [
-    "timestamp", "underlying", "spot_close", "signal_state",
-    "loxx_width", "loxx_width_avg", "kc_sloping_up", "kc_sloping_down", "momentum_accelerating"
-]
-
-TRADE_HEADERS = [
-    "trading_date", "expiry_date", "trade_num", "direction",
-    "entry_time", "exit_time", "spot_at_entry", "atm_strike", "option_symbol",
-    "entry_price", "exit_price", "exit_reason", "pnl_pct"
-]
-
-OPEN_POSITIONS_TAB = "Open_Positions"
-OPEN_POSITIONS_HEADERS = [
-    "underlying", "trading_date", "direction", "entry_ts", "entry_price",
-    "spot_entry", "atm_strike", "symbol", "token", "trade_num",
-    "latest_opt_price", "latest_opt_sl", "last_alerted_sl", "trade_sheet"
-]
-
-TRADE_MONITOR_HEADERS = [
-    "timestamp", "event", "spot_price", "premium_price",
-    "spot_13ema_sl", "premium_13ema_sl", "pnl_pct", "notes"
-]
+HEARTBEAT_HEADERS = ["timestamp", "underlying", "spot_close", "signal_state", "loxx_width", "loxx_width_avg", "kc_sloping_up", "kc_sloping_down", "momentum_accelerating"]
+TRADE_HEADERS = ["trading_date", "expiry_date", "trade_num", "direction", "entry_time", "exit_time", "spot_at_entry", "atm_strike", "option_symbol", "entry_price", "exit_price", "exit_reason", "pnl_pct"]
+OPEN_POSITIONS_HEADERS = ["underlying", "trading_date", "direction", "entry_ts", "entry_price", "spot_entry", "atm_strike", "symbol", "token", "trade_num", "latest_opt_price", "latest_opt_sl", "last_alerted_sl", "trade_sheet"]
+TRADE_MONITOR_HEADERS = ["timestamp", "event", "spot_price", "premium_price", "spot_13ema_sl", "premium_13ema_sl", "pnl_pct", "notes"]
 
 # ─── 2. SIDEBAR CONFIGURATION ───
 st.sidebar.header("⚙️ Index Parameters")
@@ -136,8 +102,7 @@ def login():
     obj = SmartConnect(api_key=API_KEY)
     totp = pyotp.TOTP(TOTP_SECRET).now()
     data = obj.generateSession(CLIENT_ID, PASSWORD, totp)
-    if not data.get("status"):
-        raise RuntimeError(f"SmartAPI login failed: {data}")
+    if not data.get("status"): raise RuntimeError(f"SmartAPI login failed: {data}")
     return obj
 
 def get_sheet_client():
@@ -149,24 +114,15 @@ def get_sheet_client():
     return gspread.authorize(creds)
 
 def send_telegram_alert(message):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=5)
-    except Exception as e:
-        logging.error(f"Telegram alert failed: {e}")
+    try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=5)
+    except Exception as e: logging.error(f"Telegram alert failed: {e}")
 
 def build_instrument_lookup(underlying):
-    try:
-        resp = requests.get(INSTRUMENT_MASTER_URL, timeout=30)
-        resp.raise_for_status()
-    except requests.exceptions.HTTPError:
-        resp = requests.get(INSTRUMENT_MASTER_URL_FALLBACK, timeout=30)
-        resp.raise_for_status()
-    instruments = resp.json()
-    return {inst["symbol"]: inst["token"] for inst in instruments if inst.get("name") == underlying and inst.get("instrumenttype") == "OPTIDX"}
+    try: resp = requests.get(INSTRUMENT_MASTER_URL, timeout=30)
+    except requests.exceptions.HTTPError: resp = requests.get(INSTRUMENT_MASTER_URL_FALLBACK, timeout=30)
+    return {inst["symbol"]: inst["token"] for inst in resp.json() if inst.get("name") == underlying and inst.get("instrumenttype") == "OPTIDX"}
 
-def expiry_to_symbol_str(expiry_date):
-    return expiry_date.strftime("%d%b%y").upper()
+def expiry_to_symbol_str(expiry_date): return expiry_date.strftime("%d%b%y").upper()
 
 def fetch_option_token(lookup, underlying, expiry_date, strike, side):
     symbol = f"{underlying}{expiry_to_symbol_str(expiry_date)}{strike}{side}"
@@ -177,12 +133,9 @@ def get_ltp(smart_obj, tradingsymbol, symboltoken, exchange="NFO"):
         try:
             resp = smart_obj.ltpData(exchange, tradingsymbol, symboltoken)
             if not resp.get("status"):
-                time.sleep(1)
-                smart_obj = login()
-                continue
+                time.sleep(1); smart_obj = login(); continue
             ltp = resp.get("data", {}).get("ltp")
-            if ltp is not None:
-                return float(ltp), smart_obj
+            if ltp is not None: return float(ltp), smart_obj
             time.sleep(1)
         except Exception as e:
             logging.warning(f"LTP fetch failed for {tradingsymbol} ({attempt}/3): {e}")
@@ -190,56 +143,44 @@ def get_ltp(smart_obj, tradingsymbol, symboltoken, exchange="NFO"):
     return None, smart_obj
 
 def get_candles_with_relogin(smart_obj, token, from_dt, to_dt, exchange="NSE", interval=INTERVAL):
-    params = {
-        "exchange": exchange, "symboltoken": token, "interval": interval,
-        "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"), "todate": to_dt.strftime("%Y-%m-%d %H:%M"),
-    }
+    params = {"exchange": exchange, "symboltoken": token, "interval": interval, "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"), "todate": to_dt.strftime("%Y-%m-%d %H:%M")}
     for attempt in range(1, 5):
         try:
             resp = smart_obj.getCandleData(params)
             if not resp.get("status"):
-                time.sleep(2)
-                smart_obj = login()
-                continue
+                time.sleep(2); smart_obj = login(); continue
             df = pd.DataFrame(resp["data"], columns=["timestamp", "open", "high", "low", "close", "volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
             return df, smart_obj
-        except Exception:
-            time.sleep(1)
+        except Exception: time.sleep(1)
     return pd.DataFrame(), smart_obj
 
 # ─── 4. SHEETS & PERSISTENCE HELPERS ───
 def _with_retry(fn, max_retries=5, base_delay=2.0):
     for attempt in range(1, max_retries + 1):
-        try:
-            return fn()
+        try: return fn()
         except gspread.exceptions.APIError as e:
             status = getattr(e.response, "status_code", None)
             if status in (429, 500, 503) and attempt < max_retries:
-                time.sleep(base_delay * (2 ** (attempt - 1)))
-                continue
+                time.sleep(base_delay * (2 ** (attempt - 1))); continue
             raise
 
 def append_to_sheet(sh, tab_name, header, row_data):
-    try:
-        ws = _with_retry(lambda: sh.worksheet(tab_name))
+    try: ws = _with_retry(lambda: sh.worksheet(tab_name))
     except gspread.WorksheetNotFound:
         ws = _with_retry(lambda: sh.add_worksheet(title=tab_name, rows=2000, cols=len(header)))
         _with_retry(lambda: ws.update([header], value_input_option="USER_ENTERED"))
     existing = _with_retry(lambda: ws.get_all_values())
-    if not existing:
-        _with_retry(lambda: ws.update([header], value_input_option="USER_ENTERED"))
+    if not existing: _with_retry(lambda: ws.update([header], value_input_option="USER_ENTERED"))
     _with_retry(lambda: ws.append_row(row_data, value_input_option="USER_ENTERED"))
 
 def _get_or_create_open_positions_ws(sh):
-    try:
-        ws = _with_retry(lambda: sh.worksheet(OPEN_POSITIONS_TAB))
+    try: ws = _with_retry(lambda: sh.worksheet(OPEN_POSITIONS_TAB))
     except gspread.WorksheetNotFound:
         ws = _with_retry(lambda: sh.add_worksheet(title=OPEN_POSITIONS_TAB, rows=10, cols=len(OPEN_POSITIONS_HEADERS)))
         _with_retry(lambda: ws.update([OPEN_POSITIONS_HEADERS], value_input_option="USER_ENTERED"))
     existing = _with_retry(lambda: ws.get_all_values())
-    if not existing:
-        _with_retry(lambda: ws.update([OPEN_POSITIONS_HEADERS], value_input_option="USER_ENTERED"))
+    if not existing: _with_retry(lambda: ws.update([OPEN_POSITIONS_HEADERS], value_input_option="USER_ENTERED"))
     return ws
 
 def save_open_position_to_sheet(sh, underlying, position, trading_date):
@@ -258,20 +199,16 @@ def save_open_position_to_sheet(sh, underlying, position, trading_date):
     existing_row_idx = None
     for i, r in enumerate(rows[1:], start=2):
         if r and r[0] == underlying:
-            existing_row_idx = i
-            break
-    if existing_row_idx:
-        _with_retry(lambda: ws.update(f"A{existing_row_idx}:N{existing_row_idx}", [row_data], value_input_option="USER_ENTERED"))
-    else:
-        _with_retry(lambda: ws.append_row(row_data, value_input_option="USER_ENTERED"))
+            existing_row_idx = i; break
+    if existing_row_idx: _with_retry(lambda: ws.update(f"A{existing_row_idx}:N{existing_row_idx}", [row_data], value_input_option="USER_ENTERED"))
+    else: _with_retry(lambda: ws.append_row(row_data, value_input_option="USER_ENTERED"))
 
 def clear_open_position_from_sheet(sh, underlying):
     ws = _get_or_create_open_positions_ws(sh)
     rows = _with_retry(lambda: ws.get_all_values())
     for i, r in enumerate(rows[1:], start=2):
         if r and r[0] == underlying:
-            _with_retry(lambda: ws.delete_rows(i))
-            break
+            _with_retry(lambda: ws.delete_rows(i)); break
 
 def load_open_positions_from_sheet(sh, trading_date):
     ws = _get_or_create_open_positions_ws(sh)
@@ -279,42 +216,23 @@ def load_open_positions_from_sheet(sh, trading_date):
     recovered = {}
     stale_row_indices = []
     for i, r in enumerate(rows[1:], start=2):
-        if not r or not r[0]:
-            continue
+        if not r or not r[0]: continue
         underlying = r[0]
-        row_date = r[1]
-        if row_date != trading_date.isoformat():
-            stale_row_indices.append(i)
-            continue
-        position = {
-            "direction": r[2],
-            "entry_ts": dt.datetime.strptime(r[3], "%Y-%m-%d %H:%M:%S"),
-            "entry_price": float(r[4]),
-            "spot_entry": float(r[5]),
-            "atm_strike": r[6],
-            "symbol": r[7],
-            "token": r[8],
-            "trade_num": int(r[9]),
-            "latest_opt_price": float(r[10]),
-            "latest_opt_sl": float(r[11]),
-            "last_alerted_sl": float(r[12]),
-            "trade_sheet": r[13] if len(r) > 13 else ""
+        if r[1] != trading_date.isoformat():
+            stale_row_indices.append(i); continue
+        recovered[underlying] = {
+            "direction": r[2], "entry_ts": dt.datetime.strptime(r[3], "%Y-%m-%d %H:%M:%S"), "entry_price": float(r[4]),
+            "spot_entry": float(r[5]), "atm_strike": r[6], "symbol": r[7], "token": r[8], "trade_num": int(r[9]),
+            "latest_opt_price": float(r[10]), "latest_opt_sl": float(r[11]), "last_alerted_sl": float(r[12]), "trade_sheet": r[13] if len(r) > 13 else ""
         }
-        recovered[underlying] = position
-    for i in sorted(stale_row_indices, reverse=True):
-        _with_retry(lambda idx=i: ws.delete_rows(idx))
+    for i in sorted(stale_row_indices, reverse=True): _with_retry(lambda idx=i: ws.delete_rows(idx))
     return recovered
 
 def make_trade_sheet_name(underlying, trade_num, trading_date):
     return f"Trade_{underlying}_{trading_date.isoformat()}_{trade_num}"[:99]
 
 def log_trade_event(sh, tab_name, event, spot_price, premium_price, spot_sl, premium_sl, pnl_pct, notes=""):
-    row = [
-        get_ist_now().strftime("%Y-%m-%d %H:%M:%S"), str(event),
-        float(round(spot_price, 2)), float(round(premium_price, 2)),
-        float(round(spot_sl, 2)), float(round(premium_sl, 2)),
-        float(round(pnl_pct, 2)), str(notes)
-    ]
+    row = [get_ist_now().strftime("%Y-%m-%d %H:%M:%S"), str(event), float(round(spot_price, 2)), float(round(premium_price, 2)), float(round(spot_sl, 2)), float(round(premium_sl, 2)), float(round(pnl_pct, 2)), str(notes)]
     append_to_sheet(sh, tab_name, TRADE_MONITOR_HEADERS, row)
 
 # ─── 5. TECHNICAL INDICATORS ───
@@ -327,8 +245,7 @@ def compute_keltner(df, period=KC_PERIOD, mult=KC_ATR_MULT):
 
 def compute_adx_adxr(df, period=ADX_PERIOD):
     high, low, close = df["high"], df["low"], df["close"]
-    up_move = high.diff()
-    down_move = -low.diff()
+    up_move, down_move = high.diff(), -low.diff()
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
@@ -337,37 +254,25 @@ def compute_adx_adxr(df, period=ADX_PERIOD):
     minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(alpha=1 / period, adjust=False).mean() / atr
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
     adx = dx.ewm(alpha=1 / period, adjust=False).mean()
-    adxr = (adx + adx.shift(period)) / 2.0
-    return adx, adxr, plus_di, minus_di
+    return adx, (adx + adx.shift(period)) / 2.0, plus_di, minus_di
 
 def compute_chop(df, period=CHOP_PERIOD):
-    tr1 = df['high'] - df['low']
-    tr2 = (df['high'] - df['close'].shift(1)).abs()
-    tr3 = (df['low'] - df['close'].shift(1)).abs()
+    tr1, tr2, tr3 = df['high'] - df['low'], (df['high'] - df['close'].shift(1)).abs(), (df['low'] - df['close'].shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_sum = tr.rolling(period).sum()
-    max_high = df['high'].rolling(period).max()
-    min_low = df['low'].rolling(period).min()
-    denom = (max_high - min_low).replace(0, np.nan)
+    denom = (df['high'].rolling(period).max() - df['low'].rolling(period).min()).replace(0, np.nan)
     return 100 * np.log10(atr_sum / denom) / np.log10(period)
 
 def compute_lwma(series, period):
     weights = np.arange(1, period + 1)
-    sum_weights = weights.sum()
-    return series.rolling(period).apply(lambda x: np.dot(x, weights) / sum_weights, raw=True)
+    return series.rolling(period).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
 
 def compute_loxx_hlhvb(df, period=LOXX_PERIOD, dev=LOXX_DEV):
-    half_period = int(period / 2)
-    hull_period = int(np.sqrt(period))
-    wma_half = compute_lwma(df["close"], half_period)
+    wma_half = compute_lwma(df["close"], int(period / 2))
     wma_full = compute_lwma(df["close"], period)
-    raw_hma = 2.0 * wma_half - wma_full
-    buffer_me = compute_lwma(raw_hma, hull_period)
-    hl_range = df["high"] - df["low"]
-    deviation = hl_range.rolling(period).std(ddof=1)
-    buffer_up = buffer_me + (deviation * dev)
-    buffer_dn = buffer_me - (deviation * dev)
-    return buffer_up, buffer_me, buffer_dn
+    buffer_me = compute_lwma(2.0 * wma_half - wma_full, int(np.sqrt(period)))
+    deviation = (df["high"] - df["low"]).rolling(period).std(ddof=1)
+    return buffer_me + (deviation * dev), buffer_me, buffer_me - (deviation * dev)
 
 def add_intraday_indicators(df):
     df = df.copy().reset_index(drop=True)
@@ -382,79 +287,41 @@ def add_intraday_indicators(df):
     df["loxx_width_avg"] = df["loxx_width"].rolling(window=LOXX_PERIOD).mean()
     df["adx"], df["adxr"], df["plus_di"], df["minus_di"] = compute_adx_adxr(df)
     df["chop"] = compute_chop(df)
-    df["adx_prev"] = df["adx"].shift(1)
-    df["adxr_prev"] = df["adxr"].shift(1)
-    df["chop_prev"] = df["chop"].shift(1)
+    df["adx_prev"], df["adxr_prev"], df["chop_prev"] = df["adx"].shift(1), df["adxr"].shift(1), df["chop"].shift(1)
     return df
 
 # ─── 6. LIVE EVALUATION & EXECUTION LOGIC ───
-def expected_latest_candle_ts(now):
-    floored_minute = (now.minute // 3) * 3
-    return now.replace(minute=floored_minute, second=0, microsecond=0)
-
 def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strike_step, expiry_date, active_positions, daily_trade_counts, last_processed, trading_date):
-    now = get_ist_now()
     day_from = dt.datetime.combine(trading_date, MARKET_OPEN)
+    now = get_ist_now()
     config = INDEX_PARAMS[underlying]
-    expected_ts = expected_latest_candle_ts(now)
 
-    is_settled = False
-    settled_row = None
+    spot_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NSE", interval=INTERVAL)
+    if spot_df.empty: return
 
-    # ── EXACT TIMESTAMP MATCH + DOUBLE FETCH STABILITY CHECK ──
-    for attempt in range(1, DATA_FRESHNESS_RETRIES + 1):
-        spot_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NSE", interval=INTERVAL)
-        if spot_df.empty:
+    spot_df = add_intraday_indicators(spot_df)
+    day_df = spot_df[spot_df["timestamp"].dt.date == trading_date].reset_index(drop=True)
+
+    if len(day_df) < 2:
+        for fresh_attempt in range(1, DATA_FRESHNESS_RETRIES + 1):
+            logging.warning(f"[{underlying}] Only {len(day_df)} candle(s) for today (attempt {fresh_attempt}/{DATA_FRESHNESS_RETRIES}) — retrying in {DATA_FRESHNESS_RETRY_DELAY}s...")
             time.sleep(DATA_FRESHNESS_RETRY_DELAY)
             now = get_ist_now()
-            expected_ts = expected_latest_candle_ts(now)
-            continue
+            spot_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NSE", interval=INTERVAL)
+            if spot_df.empty: continue
+            spot_df = add_intraday_indicators(spot_df)
+            day_df = spot_df[spot_df["timestamp"].dt.date == trading_date].reset_index(drop=True)
+            if len(day_df) >= 2: break
 
-        day_df = add_intraday_indicators(spot_df)
-        day_df = day_df[day_df["timestamp"].dt.date == trading_date].reset_index(drop=True)
-
-        target_row = day_df[day_df["timestamp"] == expected_ts]
-        if target_row.empty:
-            logging.warning(f"[{underlying}] Candle {expected_ts.strftime('%H:%M')} not found. Attempt {attempt}/{DATA_FRESHNESS_RETRIES}")
-            time.sleep(DATA_FRESHNESS_RETRY_DELAY)
-            now = get_ist_now()
-            expected_ts = expected_latest_candle_ts(now)
-            continue
-
-        candidate = target_row.iloc[0]
-        time.sleep(CANDLE_STABILITY_CHECK_DELAY)
-        
-        recheck_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), get_ist_now(), exchange="NSE", interval=INTERVAL)
-        if not recheck_df.empty:
-            recheck_day_df = add_intraday_indicators(recheck_df)
-            recheck_day_df = recheck_day_df[recheck_day_df["timestamp"].dt.date == trading_date].reset_index(drop=True)
-            match = recheck_day_df[recheck_day_df["timestamp"] == expected_ts]
-            
-            if not match.empty:
-                m = match.iloc[0]
-                if (m["open"] == candidate["open"] and m["high"] == candidate["high"] and 
-                    m["low"] == candidate["low"] and m["close"] == candidate["close"]):
-                    is_settled = True
-                    settled_row = m
-                    break
-                else:
-                    logging.warning(f"[{underlying}] Candle {expected_ts.strftime('%H:%M')} revising OHLC — waiting to settle...")
-            else:
-                logging.warning(f"[{underlying}] Candle disappeared on recheck.")
-        
-        time.sleep(DATA_FRESHNESS_RETRY_DELAY)
-        now = get_ist_now()
-        expected_ts = expected_latest_candle_ts(now)
-
-    if not is_settled or settled_row is None:
-        logging.error(f"[{underlying}] Giving up this cycle — candle data still not synced/settled.")
+    if len(day_df) < 2:
+        logging.error(f"[{underlying}] Giving up this cycle — candle data still not synced.")
         return
 
-    row = settled_row
+    # ── Using EXACT logic from live_engine_v73-10_2.py ──
+    row = day_df.iloc[-2]
     ts, t = row["timestamp"], row["timestamp"].time()
 
-    if last_processed.get(underlying) == ts:
-        return
+    if last_processed.get(underlying) == ts: return
     last_processed[underlying] = ts
 
     close, high, low, ema_sl = row["close"], row["high"], row["low"], row["ema_sl"]
@@ -463,18 +330,21 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
     # ── 1. Positional Management & Exits ──
     if position is not None:
         symbol = position["symbol"]
-        day_from_warmup = day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS)
-        opt_df, smart = get_candles_with_relogin(smart, position["token"], day_from_warmup, now, exchange="NFO", interval=INTERVAL)
+        opt_df, smart = get_candles_with_relogin(smart, position["token"], day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NFO", interval=INTERVAL)
 
         if not opt_df.empty:
             opt_df["ema_sl"] = opt_df["close"].ewm(span=EMA_SL_PERIOD, adjust=False).mean()
             opt_row = opt_df[opt_df["timestamp"] == ts]
 
-            candle_opt_price = opt_row.iloc[0]["close"] if not opt_row.empty else opt_df.iloc[-1]["close"]
-            opt_ema_sl = opt_row.iloc[0]["ema_sl"] if not opt_row.empty else opt_df.iloc[-1]["ema_sl"]
+            if not opt_row.empty:
+                candle_opt_price, opt_ema_sl = opt_row.iloc[0]["close"], opt_row.iloc[0]["ema_sl"]
+            else:
+                candle_opt_price = opt_df.iloc[-2]["close"] if len(opt_df) > 1 else opt_df.iloc[-1]["close"]
+                opt_ema_sl = opt_df.iloc[-2]["ema_sl"] if len(opt_df) > 1 else opt_df.iloc[-1]["ema_sl"]
 
             ltp_price, smart = get_ltp(smart, symbol, position["token"], exchange="NFO")
             current_opt_price = ltp_price if ltp_price is not None else candle_opt_price
+            if ltp_price is None: logging.warning(f"[{underlying}] LTP fetch failed for {symbol}, falling back to candle close.")
 
             active_positions[underlying]["latest_opt_price"] = current_opt_price
             active_positions[underlying]["latest_opt_sl"] = opt_ema_sl
@@ -483,51 +353,30 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
             pnl_pct = ((current_opt_price - entry_price) / entry_price) * 100.0
 
             exit_reason = None
-            if pnl_pct <= -STOP_LOSS_PCT:
-                exit_reason = "HARD_STOP_LOSS_HIT"
-            elif t >= EOD_EXIT_TIME:
-                exit_reason = "EOD_SQUAREOFF"
+            if pnl_pct <= -STOP_LOSS_PCT: exit_reason = "HARD_STOP_LOSS_HIT"
+            elif t >= EOD_EXIT_TIME: exit_reason = "EOD_SQUAREOFF"
             elif config["exit_mode"] == "SPOT_EMA":
-                if position["direction"] == "CE" and close < ema_sl:
-                    exit_reason = f"SPOT_EMA{EMA_SL_PERIOD}_CROSSDOWN"
-                elif position["direction"] == "PE" and close > ema_sl:
-                    exit_reason = f"SPOT_EMA{EMA_SL_PERIOD}_CROSSUP"
+                if position["direction"] == "CE" and close < ema_sl: exit_reason = f"SPOT_EMA{EMA_SL_PERIOD}_CROSSDOWN"
+                elif position["direction"] == "PE" and close > ema_sl: exit_reason = f"SPOT_EMA{EMA_SL_PERIOD}_CROSSUP"
             elif config["exit_mode"] == "PREMIUM_EMA":
-                if current_opt_price < opt_ema_sl:
-                    exit_reason = f"PREMIUM_EMA{EMA_SL_PERIOD}_CROSSDOWN"
+                if current_opt_price < opt_ema_sl: exit_reason = f"PREMIUM_EMA{EMA_SL_PERIOD}_CROSSDOWN"
 
             if exit_reason is None:
                 trade_sheet = position.get("trade_sheet")
-                if trade_sheet:
-                    log_trade_event(sh, trade_sheet, "MONITOR", close, current_opt_price, ema_sl, opt_ema_sl, pnl_pct)
-                monitor_msg = (
-                    f"🔵 *{underlying} Update* 🔵\n\n*Symbol:* `{symbol}`\n*Time:* {ts.strftime('%H:%M')}\n"
-                    f"*Spot Price:* {close:.2f}\n*Premium Price:* Rs {current_opt_price:.2f}\n"
-                    f"*Current PnL:* {pnl_pct:.2f}%\n*SL - Spot 13 EMA:* {ema_sl:.2f}\n*SL - Premium 13 EMA:* {opt_ema_sl:.2f}"
-                )
+                if trade_sheet: log_trade_event(sh, trade_sheet, "MONITOR", close, current_opt_price, ema_sl, opt_ema_sl, pnl_pct)
+                monitor_msg = f"🔵 *{underlying} Update* 🔵\n\n*Symbol:* `{symbol}`\n*Time:* {ts.strftime('%H:%M')}\n*Spot Price:* {close:.2f}\n*Premium Price:* Rs {current_opt_price:.2f}\n*Current PnL:* {pnl_pct:.2f}%\n*SL - Spot 13 EMA:* {ema_sl:.2f}\n*SL - Premium 13 EMA:* {opt_ema_sl:.2f}"
                 send_telegram_alert(monitor_msg)
                 active_sl = ema_sl if config["exit_mode"] == "SPOT_EMA" else opt_ema_sl
                 active_positions[underlying]["last_alerted_sl"] = active_sl
                 save_open_position_to_sheet(sh, underlying, active_positions[underlying], trading_date)
 
             if exit_reason:
-                msg = (
-                    f"🔴 *{underlying} Exit* 🔴\n\n*Symbol:* `{symbol}`\n*Time:* {ts.strftime('%H:%M')}\n"
-                    f"*Spot Price:* {close:.2f}\n*Exit Price:* Rs {current_opt_price:.2f}\n"
-                    f"*SL - Spot 13 EMA:* {ema_sl:.2f}\n*SL - Premium 13 EMA:* {opt_ema_sl:.2f}\n"
-                    f"*Reason:* {exit_reason}\n*PnL:* {pnl_pct:.2f}%"
-                )
+                msg = f"🔴 *{underlying} Exit* 🔴\n\n*Symbol:* `{symbol}`\n*Time:* {ts.strftime('%H:%M')}\n*Spot Price:* {close:.2f}\n*Exit Price:* Rs {current_opt_price:.2f}\n*SL - Spot 13 EMA:* {ema_sl:.2f}\n*SL - Premium 13 EMA:* {opt_ema_sl:.2f}\n*Reason:* {exit_reason}\n*PnL:* {pnl_pct:.2f}%"
                 send_telegram_alert(msg)
-                trade_row = [
-                    trading_date.isoformat(), expiry_date.isoformat(), int(position["trade_num"]), str(position["direction"]),
-                    position["entry_ts"].strftime("%H:%M:%S"), ts.strftime("%H:%M:%S"), float(round(position["spot_entry"], 2)),
-                    int(position["atm_strike"]), str(symbol), float(round(entry_price, 2)), float(round(current_opt_price, 2)),
-                    str(exit_reason), float(round(pnl_pct, 2))
-                ]
+                trade_row = [trading_date.isoformat(), expiry_date.isoformat(), int(position["trade_num"]), str(position["direction"]), position["entry_ts"].strftime("%H:%M:%S"), ts.strftime("%H:%M:%S"), float(round(position["spot_entry"], 2)), int(position["atm_strike"]), str(symbol), float(round(entry_price, 2)), float(round(current_opt_price, 2)), str(exit_reason), float(round(pnl_pct, 2))]
                 append_to_sheet(sh, f"Live_Trades_{trading_date.isoformat()}", TRADE_HEADERS, trade_row)
                 trade_sheet = position.get("trade_sheet")
-                if trade_sheet:
-                    log_trade_event(sh, trade_sheet, "EXIT", close, current_opt_price, ema_sl, opt_ema_sl, pnl_pct, notes=exit_reason)
+                if trade_sheet: log_trade_event(sh, trade_sheet, "EXIT", close, current_opt_price, ema_sl, opt_ema_sl, pnl_pct, notes=exit_reason)
                 clear_open_position_from_sheet(sh, underlying)
                 active_positions[underlying] = None
 
@@ -562,18 +411,12 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
 
     if active_positions[underlying]:
         pos = active_positions[underlying]
-        curr_opt = pos.get("latest_opt_price", 0.0)
-        curr_sl = pos.get("latest_opt_sl", 0.0)
+        curr_opt, curr_sl = pos.get("latest_opt_price", 0.0), pos.get("latest_opt_sl", 0.0)
         status_str = f"ACTIVE ({pos['direction']}) | Opt: {curr_opt:.1f} | SL: {curr_sl:.1f}"
     else:
-        status_str = "SIGNAL: " + signal if signal else "WAITING"
+        status_str = f"SIGNAL: {signal}" if signal else "WAITING"
 
-    heartbeat_row = [
-        ts.strftime("%Y-%m-%d %H:%M:%S"), str(underlying), float(round(close, 2)), status_str,
-        float(round(loxx_width, 2)) if pd.notna(loxx_width) else 0.0,
-        float(round(loxx_width_avg, 2)) if pd.notna(loxx_width_avg) else 0.0,
-        bool(is_kc_sloping_up), bool(is_kc_sloping_down), bool(momentum_accelerating)
-    ]
+    heartbeat_row = [ts.strftime("%Y-%m-%d %H:%M:%S"), str(underlying), float(round(close, 2)), status_str, float(round(loxx_width, 2)) if pd.notna(loxx_width) else 0.0, float(round(loxx_width_avg, 2)) if pd.notna(loxx_width_avg) else 0.0, bool(is_kc_sloping_up), bool(is_kc_sloping_down), bool(momentum_accelerating)]
     append_to_sheet(sh, f"Live_Heartbeat_{trading_date.isoformat()}", HEARTBEAT_HEADERS, heartbeat_row)
 
     can_enter = (active_positions[underlying] is None) and (daily_trade_counts[underlying] < MAX_TRADES_PER_DAY) and (ENTRY_WINDOW_START <= t <= ENTRY_WINDOW_END)
@@ -585,22 +428,23 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
             logging.error(f"[{underlying}] Could not resolve token for '{symbol}'. Entry skipped.")
             return
 
-        day_from_warmup = day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS)
-        opt_df, smart = get_candles_with_relogin(smart, token, day_from_warmup, now, exchange="NFO", interval=INTERVAL)
-
+        opt_df, smart = get_candles_with_relogin(smart, token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NFO", interval=INTERVAL)
         if opt_df.empty:
             for opt_attempt in range(1, DATA_FRESHNESS_RETRIES + 1):
                 time.sleep(DATA_FRESHNESS_RETRY_DELAY)
                 now = get_ist_now()
-                opt_df, smart = get_candles_with_relogin(smart, token, day_from_warmup, now, exchange="NFO", interval=INTERVAL)
-                if not opt_df.empty:
-                    break
+                opt_df, smart = get_candles_with_relogin(smart, token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NFO", interval=INTERVAL)
+                if not opt_df.empty: break
 
         if not opt_df.empty:
             opt_df["ema_sl"] = opt_df["close"].ewm(span=EMA_SL_PERIOD, adjust=False).mean()
             opt_row = opt_df[opt_df["timestamp"] == ts]
-            candle_entry_price = opt_row.iloc[0]["close"] if not opt_row.empty else opt_df.iloc[-1]["close"]
-            opt_ema_sl = opt_row.iloc[0]["ema_sl"] if not opt_row.empty else opt_df.iloc[-1]["ema_sl"]
+            
+            if not opt_row.empty:
+                candle_entry_price, opt_ema_sl = opt_row.iloc[0]["close"], opt_row.iloc[0]["ema_sl"]
+            else:
+                candle_entry_price = opt_df.iloc[-2]["close"] if len(opt_df) > 1 else opt_df.iloc[-1]["close"]
+                opt_ema_sl = opt_df.iloc[-2]["ema_sl"] if len(opt_df) > 1 else opt_df.iloc[-1]["ema_sl"]
 
             ltp_price, smart = get_ltp(smart, symbol, token, exchange="NFO")
             entry_price = ltp_price if ltp_price is not None else candle_entry_price
@@ -616,11 +460,7 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
             save_open_position_to_sheet(sh, underlying, active_positions[underlying], trading_date)
             log_trade_event(sh, active_positions[underlying]["trade_sheet"], "ENTRY", close, entry_price, ema_sl, opt_ema_sl, 0.0, notes=signal)
 
-            msg = (
-                f"🟢 *{underlying} Entry* 🟢\n\n*Symbol:* `{symbol}`\n*Time:* {ts.strftime('%H:%M')}\n"
-                f"*Spot Price:* {close:.2f}\n*Entry Price:* Rs {entry_price:.2f}\n"
-                f"*SL - Spot 13 EMA:* {ema_sl:.2f}\n*SL - Premium 13 EMA:* {opt_ema_sl:.2f}"
-            )
+            msg = f"🟢 *{underlying} Entry* 🟢\n\n*Symbol:* `{symbol}`\n*Time:* {ts.strftime('%H:%M')}\n*Spot Price:* {close:.2f}\n*Entry Price:* Rs {entry_price:.2f}\n*SL - Spot 13 EMA:* {ema_sl:.2f}\n*SL - Premium 13 EMA:* {opt_ema_sl:.2f}"
             send_telegram_alert(msg)
 
 # ─── 7. LIVE ENGINE THREAD ───
@@ -663,14 +503,11 @@ def run_live_trading_engine(stop_event, sheet_id):
         seconds_until_next_candle = (3 - (now.minute % 3)) * 60 - now.second
         if seconds_until_next_candle <= 0: seconds_until_next_candle = 180
 
-        sleep_end = now + dt.timedelta(seconds=seconds_until_next_candle + 2)
+        sleep_end = now + dt.timedelta(seconds=seconds_until_next_candle + 15)
         while get_ist_now() < sleep_end:
-            if stop_event.is_set():
-                send_telegram_alert("🛑 *Engine Stopped via Dashboard.*")
-                return
+            if stop_event.is_set(): return
             time.sleep(1)
 
-        # ── CONCURRENCY: Nifty and BankNifty fetch and evaluate simultaneously ──
         def safe_evaluate(und):
             try: evaluate_candle(smart, lookups[und], gc, sh, und, INDEX_PARAMS[und]["token"], INDEX_PARAMS[und]["strike_step"], INDEX_PARAMS[und]["expiry"], active_positions, daily_trade_counts, last_processed, trading_date)
             except Exception as e: logging.error(f"Error {und}: {e}")
@@ -686,36 +523,28 @@ def apply_slippage(action, price):
     return (round(price - adj, 2), round(adj, 2)) if action == "SELL" else (round(price + adj, 2), round(adj, 2))
 
 def compute_charges(action, price, qty):
-    if not ENABLE_TRANSACTION_COSTS:
-        return 0.0
+    if not ENABLE_TRANSACTION_COSTS: return 0.0
     turnover = price * qty
-    brokerage = BROKERAGE_PER_ORDER
     stt = turnover * STT_SELL_PCT if action == "SELL" else 0.0
     exchange = turnover * EXCHANGE_TXN_PCT
-    gst = (brokerage + exchange) * GST_PCT
+    gst = (BROKERAGE_PER_ORDER + exchange) * GST_PCT
     sebi = turnover * SEBI_CHARGES_PCT
     stamp = turnover * STAMP_DUTY_PCT if action == "BUY" else 0.0
-    return round(brokerage + stt + exchange + gst + sebi + stamp, 2)
+    return round(BROKERAGE_PER_ORDER + stt + exchange + gst + sebi + stamp, 2)
 
 def run_backtest_suite(underlying, trade_date, expiry_date):
     smart = login()
     lookup = build_instrument_lookup(underlying)
-
     config = INDEX_PARAMS[underlying]
-    token = config["token"]
-    lot_size = config["lot_size"]
-    strike_step = config["strike_step"]
-    loxx_mult = config["loxx_mult"]
 
     warmup_from = dt.datetime.combine(trade_date - dt.timedelta(days=INDICATOR_WARMUP_DAYS), MARKET_OPEN)
     day_to = dt.datetime.combine(trade_date, MARKET_CLOSE)
 
-    spot_df_raw, smart = get_candles_with_relogin(smart, token, warmup_from, day_to, exchange="NSE", interval=INTERVAL)
-    if spot_df_raw.empty:
-        raise ValueError(f"No Spot data retrieved for {underlying} on {trade_date}")
+    spot_df_raw, smart = get_candles_with_relogin(smart, config["token"], warmup_from, day_to, exchange="NSE", interval=INTERVAL)
+    if spot_df_raw.empty: raise ValueError(f"No Spot data retrieved for {underlying} on {trade_date}")
 
-    day_df_base = add_intraday_indicators(spot_df_raw)
-    day_df = day_df_base[day_df_base["timestamp"].dt.date == trade_date].reset_index(drop=True)
+    day_df = add_intraday_indicators(spot_df_raw)
+    day_df = day_df[day_df["timestamp"].dt.date == trade_date].reset_index(drop=True)
 
     strategies = [
         {"name": "SPOT_13_EMA", "mode": "SPOT_EMA", "period": 13},
@@ -729,44 +558,31 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
     option_cache = {}
 
     for strat in strategies:
-        trades = []
-        position = None
-        trades_count = 0
+        trades, position, trades_count = [], None, 0
 
         for idx, row in day_df.iterrows():
-            ts, t, close, high, low, ema_sl = row["timestamp"], row["timestamp"].time(), row["close"], row["high"], row["low"], row["ema_sl"]
-            if t > dt.time(15, 10):
-                break
+            ts, t, close = row["timestamp"], row["timestamp"].time(), row["close"]
+            if t > dt.time(15, 10): break
 
             if position is not None:
-                opt_df = position["opt_df"]
-                matching_candle = opt_df[opt_df["timestamp"] == ts]
+                matching_candle = position["opt_df"][position["opt_df"]["timestamp"] == ts]
                 if not matching_candle.empty:
                     current_price = matching_candle.iloc[0]["close"]
                     pnl_pct = ((current_price - position["entry_price"]) / position["entry_price"]) * 100.0
 
                     exit_reason = None
-                    if pnl_pct <= -STOP_LOSS_PCT:
-                        exit_reason = "HARD_STOP_LOSS_HIT"
-                    elif t >= EOD_EXIT_TIME:
-                        exit_reason = "EOD_SQUAREOFF"
+                    if pnl_pct <= -STOP_LOSS_PCT: exit_reason = "HARD_STOP_LOSS_HIT"
+                    elif t >= EOD_EXIT_TIME: exit_reason = "EOD_SQUAREOFF"
                     elif strat["mode"] == "SPOT_EMA":
-                        if position["direction"] == "CE" and close < ema_sl:
-                            exit_reason = f"SPOT_EMA{strat['period']}_CROSSDOWN"
-                        elif position["direction"] == "PE" and close > ema_sl:
-                            exit_reason = f"SPOT_EMA{strat['period']}_CROSSUP"
+                        if position["direction"] == "CE" and close < row["ema_sl"]: exit_reason = f"SPOT_EMA{strat['period']}_CROSSDOWN"
+                        elif position["direction"] == "PE" and close > row["ema_sl"]: exit_reason = f"SPOT_EMA{strat['period']}_CROSSUP"
                     elif strat["mode"] == "PREMIUM_EMA":
-                        opt_ema_val = matching_candle.iloc[0]["ema_sl"]
-                        if current_price < opt_ema_val:
-                            exit_reason = f"PREMIUM_EMA{strat['period']}_CROSSDOWN"
+                        if current_price < matching_candle.iloc[0]["ema_sl"]: exit_reason = f"PREMIUM_EMA{strat['period']}_CROSSDOWN"
 
                     if exit_reason:
                         exit_exec, _ = apply_slippage("SELL", current_price)
-                        entry_charges = compute_charges("BUY", position["entry_price"], lot_size)
-                        exit_charges = compute_charges("SELL", exit_exec, lot_size)
-                        total_charges = round(entry_charges + exit_charges, 2)
-                        gross = round((exit_exec - position["entry_price"]) * lot_size, 2)
-                        net = round(gross - total_charges, 2)
+                        total_charges = round(compute_charges("BUY", position["entry_price"], config["lot_size"]) + compute_charges("SELL", exit_exec, config["lot_size"]), 2)
+                        gross = round((exit_exec - position["entry_price"]) * config["lot_size"], 2)
 
                         trades.append({
                             "trading_date": trade_date.isoformat(), "expiry_date": expiry_date.isoformat(),
@@ -775,76 +591,34 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
                             "spot_at_entry": position["spot_entry"], "atm_strike": position["atm_strike"],
                             "option_symbol": position["symbol"], "entry_price": position["entry_price"],
                             "exit_price": exit_exec, "exit_reason": exit_reason, "pnl_pct": round(pnl_pct, 2),
-                            "lot_size": lot_size, "gross_pnl": gross, "total_charges": total_charges, "net_pnl": net
+                            "lot_size": config["lot_size"], "gross_pnl": gross, "total_charges": total_charges, "net_pnl": round(gross - total_charges, 2)
                         })
                         position = None
 
-            can_enter = (position is None) and (trades_count < MAX_TRADES_PER_DAY) and (ENTRY_WINDOW_START <= t <= ENTRY_WINDOW_END)
-            if can_enter:
-                kc_up, kc_basis, kc_low, kc_basis_prev = row["kc_upper"], row["kc_basis"], row["kc_lower"], row["kc_basis_prev"]
-                hlhvb_up, hlhvb_me, hlhvb_dn, hlhvb_me_prev = row["hlhvb_up"], row["hlhvb_me"], row["hlhvb_dn"], row["hlhvb_me_prev"]
-                loxx_width, loxx_width_avg = row["loxx_width"], row["loxx_width_avg"]
-                ema9, ema21_entry = row["ema9"], row["ema21"]
-                adx, adxr, adx_prev, adxr_prev = row["adx"], row["adxr"], row["adx_prev"], row["adxr_prev"]
-                plus_di, minus_di, chop, chop_prev = row["plus_di"], row["minus_di"], row["chop"], row["chop_prev"]
-
-                adx_rising = (adx > adx_prev) if pd.notna(adx) and pd.notna(adx_prev) else False
-                adxr_rising = (adxr > adxr_prev) if pd.notna(adxr) and pd.notna(adxr_prev) else False
-                chop_falling = (chop < chop_prev) if pd.notna(chop) and pd.notna(chop_prev) else False
-                momentum_accelerating = (adx > ADX_MIN) and (adx > adxr) and adx_rising and adxr_rising and chop_falling
-
-                is_kc_sloping_up = (kc_basis > kc_basis_prev) if pd.notna(kc_basis_prev) else False
-                is_kc_sloping_down = (kc_basis < kc_basis_prev) if pd.notna(kc_basis_prev) else False
-                is_valid_ce_span = (low > kc_low)
-                is_valid_pe_span = (high < kc_up)
-                is_valid_loxx_width = (loxx_width <= loxx_width_avg * loxx_mult) if pd.notna(loxx_width_avg) else True
-                is_loxx_sloping_up = (hlhvb_me > hlhvb_me_prev) if pd.notna(hlhvb_me_prev) else False
-                is_loxx_sloping_down = (hlhvb_me < hlhvb_me_prev) if pd.notna(hlhvb_me_prev) else False
-                loxx_ce_valid = (close > hlhvb_dn) and is_loxx_sloping_up
-                loxx_pe_valid = (close < hlhvb_up) and is_loxx_sloping_down
+            if (position is None) and (trades_count < MAX_TRADES_PER_DAY) and (ENTRY_WINDOW_START <= t <= ENTRY_WINDOW_END):
+                momentum = (row["adx"] > ADX_MIN) and (row["adx"] > row["adxr"]) and (row["adx"] > row["adx_prev"]) and (row["adxr"] > row["adxr_prev"]) and (row["chop"] < row["chop_prev"])
+                loxx_valid = (row["loxx_width"] <= row["loxx_width_avg"] * config["loxx_mult"])
 
                 signal = None
-                if (close > kc_up) and (ema9 > ema21_entry) and momentum_accelerating and (plus_di > minus_di) and is_kc_sloping_up and is_valid_ce_span and loxx_ce_valid and is_valid_loxx_width:
-                    signal = "CE"
-                elif (close < kc_low) and (ema9 < ema21_entry) and momentum_accelerating and (minus_di > plus_di) and is_kc_sloping_down and is_valid_pe_span and loxx_pe_valid and is_valid_loxx_width:
-                    signal = "PE"
+                if close > row["kc_upper"] and row["ema9"] > row["ema21"] and momentum and row["plus_di"] > row["minus_di"] and loxx_valid and close > row["hlhvb_dn"]: signal = "CE"
+                elif close < row["kc_lower"] and row["ema9"] < row["ema21"] and momentum and row["minus_di"] > row["plus_di"] and loxx_valid and close < row["hlhvb_up"]: signal = "PE"
 
                 if signal:
-                    atm_strike = int(round(close / strike_step) * strike_step)
+                    atm_strike = int(round(close / config["strike_step"]) * config["strike_step"])
                     sym, tok = fetch_option_token(lookup, underlying, expiry_date, atm_strike, signal)
                     if tok:
-                        if tok in option_cache:
-                            opt_df = option_cache[tok].copy()
-                        else:
+                        if tok not in option_cache:
                             opt_df, smart = get_candles_with_relogin(smart, tok, warmup_from, day_to, exchange="NFO", interval=INTERVAL)
-                            if not opt_df.empty:
-                                option_cache[tok] = opt_df.copy()
-
-                        if not opt_df.empty:
-                            opt_df["ema_sl"] = opt_df["close"].ewm(span=strat["period"], adjust=False).mean()
-                            opt_row = opt_df[opt_df["timestamp"] == ts]
-                            if not opt_row.empty:
-                                raw_entry = opt_row.iloc[0]["close"]
-                                entry_exec, _ = apply_slippage("BUY", raw_entry)
+                            if not opt_df.empty: option_cache[tok] = opt_df.copy()
+                        if tok in option_cache and not option_cache[tok].empty:
+                            option_cache[tok]["ema_sl"] = option_cache[tok]["close"].ewm(span=strat["period"], adjust=False).mean()
+                            if not option_cache[tok][option_cache[tok]["timestamp"] == ts].empty:
+                                raw_entry = option_cache[tok][option_cache[tok]["timestamp"] == ts].iloc[0]["close"]
                                 trades_count += 1
-                                position = {
-                                    "direction": signal, "entry_ts": ts, "entry_price": entry_exec,
-                                    "spot_entry": close, "atm_strike": atm_strike, "symbol": sym,
-                                    "token": tok, "trade_num": trades_count, "opt_df": opt_df
-                                }
+                                position = {"direction": signal, "entry_ts": ts, "entry_price": apply_slippage("BUY", raw_entry)[0], "spot_entry": close, "atm_strike": atm_strike, "symbol": sym, "token": tok, "trade_num": trades_count, "opt_df": option_cache[tok]}
 
         all_trades_results[strat["name"]] = pd.DataFrame(trades)
-        gross_total = sum(t["gross_pnl"] for t in trades)
-        charges_total = sum(t["total_charges"] for t in trades)
-        net_total = sum(t["net_pnl"] for t in trades)
-        wins = sum(1 for t in trades if t["net_pnl"] > 0)
-        win_rate = round((wins / len(trades)) * 100, 2) if trades else 0.0
-
-        summary_rows.append({
-            "Strategy": strat["name"], "Date": trade_date.isoformat(), "Expiry": expiry_date.isoformat(),
-            "Trades": len(trades), "Win Rate (%)": win_rate, "Gross PnL (₹)": round(gross_total, 2),
-            "Charges (₹)": round(charges_total, 2), "Net PnL (₹)": round(net_total, 2)
-        })
+        summary_rows.append({"Strategy": strat["name"], "Date": trade_date.isoformat(), "Expiry": expiry_date.isoformat(), "Trades": len(trades), "Win Rate (%)": round((sum(1 for t in trades if t["net_pnl"] > 0) / len(trades)) * 100, 2) if trades else 0.0, "Gross PnL (₹)": round(sum(t["gross_pnl"] for t in trades), 2), "Charges (₹)": round(sum(t["total_charges"] for t in trades), 2), "Net PnL (₹)": round(sum(t["net_pnl"] for t in trades), 2)})
 
     return pd.DataFrame(summary_rows), all_trades_results
 
@@ -865,7 +639,7 @@ with tab_live:
             st.session_state.is_running = True
             st.rerun()
     else:
-        st.success("🟢 Engine is active. NIFTY and BANKNIFTY are evaluating concurrently with exact timestamp matching.")
+        st.success("🟢 Engine is active. NIFTY and BANKNIFTY are evaluating concurrently.")
         if st.button("⏹️ Stop Live Engine"):
             st.session_state.stop_event.set()
             st.session_state.bot_thread.join(timeout=5)
