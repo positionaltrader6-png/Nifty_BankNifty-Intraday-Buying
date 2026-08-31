@@ -1,6 +1,6 @@
 """
 ================================================================================
-Intraday Option BUYING — Streamlit Live Engine & Backtesting Suite (v7.4)
+Intraday Option BUYING — Streamlit Live Engine & Backtesting Suite (v7.5)
 ================================================================================
 """
 
@@ -19,7 +19,7 @@ import pytz
 from google.oauth2.service_account import Credentials
 
 # ─── 1. PAGE SETUP & GLOBAL CONFIG ───
-st.set_page_config(page_title="Pro Momentum Engine v7.4", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Pro Momentum Engine v7.5", page_icon="📈", layout="wide")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", force=True)
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -88,15 +88,17 @@ st.sidebar.header("⚙️ Index Parameters")
 
 nifty_expiry = st.sidebar.date_input("NIFTY Expiry Date", value=dt.date(2026, 9, 1), key="sb_nifty_exp")
 nifty_loxx = st.sidebar.number_input("NIFTY Loxx Multiplier", value=0.9, step=0.1, key="sb_nifty_loxx")
+nifty_exit = st.sidebar.selectbox("NIFTY Live Exit Mode", ["SPOT_EMA", "PREMIUM_EMA", "SPOT_PSAR", "PREMIUM_PSAR"], index=0, key="sb_nifty_exit")
 
 bn_expiry = st.sidebar.date_input("BANKNIFTY Expiry Date", value=dt.date(2026, 9, 29), key="sb_bn_exp")
 bn_loxx = st.sidebar.number_input("BANKNIFTY Loxx Multiplier", value=1.0, step=0.1, key="sb_bn_loxx")
+bn_exit = st.sidebar.selectbox("BANKNIFTY Live Exit Mode", ["SPOT_EMA", "PREMIUM_EMA", "SPOT_PSAR", "PREMIUM_PSAR"], index=0, key="sb_bn_exit")
 
 sheet_id_input = st.sidebar.text_input("Google Sheet ID", value=GOOGLE_SHEET_ID, key="sb_sheet_id")
 
 INDEX_PARAMS = {
-    "NIFTY": {"token": "99926000", "strike_step": 50, "lot_size": 65, "loxx_mult": nifty_loxx, "exit_mode": "SPOT_EMA", "expiry": nifty_expiry},
-    "BANKNIFTY": {"token": "99926009", "strike_step": 100, "lot_size": 15, "loxx_mult": bn_loxx, "exit_mode": "SPOT_EMA", "expiry": bn_expiry}
+    "NIFTY": {"token": "99926000", "strike_step": 50, "lot_size": 65, "loxx_mult": nifty_loxx, "exit_mode": nifty_exit, "expiry": nifty_expiry},
+    "BANKNIFTY": {"token": "99926009", "strike_step": 100, "lot_size": 15, "loxx_mult": bn_loxx, "exit_mode": bn_exit, "expiry": bn_expiry}
 }
 
 # ─── 3. AUTHENTICATION & API HELPERS ───
@@ -312,11 +314,38 @@ def compute_loxx_hlhvb(df, period=LOXX_PERIOD, dev=LOXX_DEV):
     deviation = (df["high"] - df["low"]).rolling(period).std(ddof=1)
     return buffer_me + (deviation * dev), buffer_me, buffer_me - (deviation * dev)
 
+def compute_psar(df, af0=0.02, af_step=0.02, af_max=0.2):
+    high, low = df['high'].values, df['low'].values
+    psar = np.zeros(len(df))
+    if len(df) == 0: return psar
+    psar[0] = low[0]
+    bull = True
+    af, ep, hp, lp = af0, high[0], high[0], low[0]
+    
+    for i in range(1, len(df)):
+        psar[i] = psar[i-1] + af * (ep - psar[i-1])
+        if bull:
+            if low[i] < psar[i]:
+                bull, psar[i], lp, ep, af = False, hp, low[i], low[i], af0
+            else:
+                if high[i] > hp: hp, ep, af = high[i], high[i], min(af + af_step, af_max)
+                if i >= 1 and low[i-1] < psar[i]: psar[i] = low[i-1]
+                if i >= 2 and low[i-2] < psar[i]: psar[i] = low[i-2]
+        else:
+            if high[i] > psar[i]:
+                bull, psar[i], hp, ep, af = True, lp, high[i], high[i], af0
+            else:
+                if low[i] < lp: lp, ep, af = low[i], low[i], min(af + af_step, af_max)
+                if i >= 1 and high[i-1] > psar[i]: psar[i] = high[i-1]
+                if i >= 2 and high[i-2] > psar[i]: psar[i] = high[i-2]
+    return psar
+
 def add_intraday_indicators(df):
     df = df.copy().reset_index(drop=True)
     df["ema9"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
     df["ema21"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean()
     df["ema_sl"] = df["close"].ewm(span=EMA_SL_PERIOD, adjust=False).mean()
+    df["psar"] = compute_psar(df)
     df["kc_upper"], df["kc_basis"], df["kc_lower"] = compute_keltner(df, KC_PERIOD, KC_ATR_MULT)
     df["kc_basis_prev"] = df["kc_basis"].shift(1)
     df["hlhvb_up"], df["hlhvb_me"], df["hlhvb_dn"] = compute_loxx_hlhvb(df, LOXX_PERIOD, LOXX_DEV)
@@ -337,34 +366,19 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
     spot_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NSE", interval=INTERVAL)
     if spot_df.empty:
         for empty_attempt in range(1, DATA_FRESHNESS_RETRIES + 1):
-            logging.warning(f"[{underlying}] Spot candle fetch returned completely empty (attempt {empty_attempt}/{DATA_FRESHNESS_RETRIES}) — retrying in {DATA_FRESHNESS_RETRY_DELAY}s...")
+            logging.warning(f"[{underlying}] Spot candle fetch returned empty (attempt {empty_attempt}/{DATA_FRESHNESS_RETRIES})")
             time.sleep(DATA_FRESHNESS_RETRY_DELAY)
             now = get_ist_now()
             spot_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NSE", interval=INTERVAL)
             if not spot_df.empty:
                 break
         if spot_df.empty:
-            logging.error(f"[{underlying}] GAVE UP this cycle — spot candle fetch still completely empty after {DATA_FRESHNESS_RETRIES} retries.")
             return
 
     spot_df = add_intraday_indicators(spot_df)
     day_df = spot_df[spot_df["timestamp"].dt.date == trading_date].reset_index(drop=True)
 
     if len(day_df) < 2:
-        for fresh_attempt in range(1, DATA_FRESHNESS_RETRIES + 1):
-            logging.warning(f"[{underlying}] Only {len(day_df)} candle(s) for today (attempt {fresh_attempt}/{DATA_FRESHNESS_RETRIES}) — retrying in {DATA_FRESHNESS_RETRY_DELAY}s...")
-            time.sleep(DATA_FRESHNESS_RETRY_DELAY)
-            now = get_ist_now()
-            spot_df, smart = get_candles_with_relogin(smart, index_token, day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS), now, exchange="NSE", interval=INTERVAL)
-            if spot_df.empty:
-                continue
-            spot_df = add_intraday_indicators(spot_df)
-            day_df = spot_df[spot_df["timestamp"].dt.date == trading_date].reset_index(drop=True)
-            if len(day_df) >= 2:
-                break
-
-    if len(day_df) < 2:
-        logging.error(f"[{underlying}] Giving up this cycle — candle data still not synced after {DATA_FRESHNESS_RETRIES} retries.")
         return
 
     row = day_df.iloc[-2]
@@ -375,7 +389,7 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
         return
     last_processed[underlying] = ts
 
-    close, high, low, ema_sl = row["close"], row["high"], row["low"], row["ema_sl"]
+    close, high, low, ema_sl, spot_psar = row["close"], row["high"], row["low"], row["ema_sl"], row["psar"]
     position = active_positions[underlying]
 
     # ── 1. Positional Management & Exits ──
@@ -386,22 +400,22 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
 
         if not opt_df.empty:
             opt_df["ema_sl"] = opt_df["close"].ewm(span=EMA_SL_PERIOD, adjust=False).mean()
+            opt_df["psar"] = compute_psar(opt_df)
             opt_row = opt_df[opt_df["timestamp"] == ts]
 
             if not opt_row.empty:
                 candle_opt_price = opt_row.iloc[0]["close"]
                 opt_ema_sl = opt_row.iloc[0]["ema_sl"]
+                opt_psar = opt_row.iloc[0]["psar"]
             else:
                 candle_opt_price = opt_df.iloc[-2]["close"] if len(opt_df) > 1 else opt_df.iloc[-1]["close"]
                 opt_ema_sl = opt_df.iloc[-2]["ema_sl"] if len(opt_df) > 1 else opt_df.iloc[-1]["ema_sl"]
+                opt_psar = opt_df.iloc[-2]["psar"] if len(opt_df) > 1 else opt_df.iloc[-1]["psar"]
 
             ltp_price, smart = get_ltp(smart, symbol, position["token"], exchange="NFO")
             current_opt_price = ltp_price if ltp_price is not None else candle_opt_price
-            if ltp_price is None:
-                logging.warning(f"[{underlying}] LTP fetch failed for {symbol}, falling back to candle close for exit pricing.")
 
             active_positions[underlying]["latest_opt_price"] = current_opt_price
-            active_positions[underlying]["latest_opt_sl"] = opt_ema_sl
 
             entry_price = position["entry_price"]
             pnl_pct = ((current_opt_price - entry_price) / entry_price) * 100.0
@@ -412,13 +426,20 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
             elif t >= EOD_EXIT_TIME:
                 exit_reason = "EOD_SQUAREOFF"
             elif config["exit_mode"] == "SPOT_EMA":
-                if position["direction"] == "CE" and close < ema_sl:
-                    exit_reason = f"SPOT_EMA{EMA_SL_PERIOD}_CROSSDOWN"
-                elif position["direction"] == "PE" and close > ema_sl:
-                    exit_reason = f"SPOT_EMA{EMA_SL_PERIOD}_CROSSUP"
+                if position["direction"] == "CE" and close < ema_sl: exit_reason = f"SPOT_EMA{EMA_SL_PERIOD}_CROSSDOWN"
+                elif position["direction"] == "PE" and close > ema_sl: exit_reason = f"SPOT_EMA{EMA_SL_PERIOD}_CROSSUP"
             elif config["exit_mode"] == "PREMIUM_EMA":
-                if current_opt_price < opt_ema_sl:
-                    exit_reason = f"PREMIUM_EMA{EMA_SL_PERIOD}_CROSSDOWN"
+                if current_opt_price < opt_ema_sl: exit_reason = f"PREMIUM_EMA{EMA_SL_PERIOD}_CROSSDOWN"
+            elif config["exit_mode"] == "SPOT_PSAR":
+                if position["direction"] == "CE" and close < spot_psar: exit_reason = "SPOT_PSAR_CROSSDOWN"
+                elif position["direction"] == "PE" and close > spot_psar: exit_reason = "SPOT_PSAR_CROSSUP"
+            elif config["exit_mode"] == "PREMIUM_PSAR":
+                if current_opt_price < opt_psar: exit_reason = "PREMIUM_PSAR_CROSSDOWN"
+
+            if config["exit_mode"] == "SPOT_EMA": active_sl = ema_sl
+            elif config["exit_mode"] == "PREMIUM_EMA": active_sl = opt_ema_sl
+            elif config["exit_mode"] == "SPOT_PSAR": active_sl = spot_psar
+            elif config["exit_mode"] == "PREMIUM_PSAR": active_sl = opt_psar
 
             if exit_reason is None:
                 monitor_msg = (
@@ -427,20 +448,20 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                     f"<b>Time:</b> {ts.strftime('%H:%M')}\n"
                     f"<b>Spot Price:</b> {close:.2f}\n"
                     f"<b>Premium Price:</b> Rs {current_opt_price:.2f}\n"
-                    f"<b>Current PnL:</b> {pnl_pct:.2f}%\n"
+                    f"<b>Current PnL:</b> {pnl_pct:.2f}%\n\n"
                     f"<b>SL - Spot 13 EMA:</b> {ema_sl:.2f}\n"
-                    f"<b>SL - Premium 13 EMA:</b> {opt_ema_sl:.2f}"
+                    f"<b>SL - Prem 13 EMA:</b> {opt_ema_sl:.2f}\n"
+                    f"<b>SL - Spot PSAR:</b> {spot_psar:.2f}\n"
+                    f"<b>SL - Prem PSAR:</b> {opt_psar:.2f}"
                 )
                 send_telegram_alert(monitor_msg)
-                logging.info(f"MONITOR {symbol}: spot_sl={ema_sl:.2f} prem_sl={opt_ema_sl:.2f} pnl={pnl_pct:.2f}%")
                 
-                active_sl = ema_sl if config["exit_mode"] == "SPOT_EMA" else opt_ema_sl
                 active_positions[underlying]["last_alerted_sl"] = active_sl
+                active_positions[underlying]["latest_opt_sl"] = active_sl
                 
                 try:
                     trade_sheet = position.get("trade_sheet")
-                    if trade_sheet:
-                        log_trade_event(sh, trade_sheet, "MONITOR", close, current_opt_price, ema_sl, opt_ema_sl, pnl_pct)
+                    if trade_sheet: log_trade_event(sh, trade_sheet, "MONITOR", close, current_opt_price, ema_sl, opt_ema_sl, pnl_pct)
                     save_open_position_to_sheet(sh, underlying, active_positions[underlying], trading_date)
                 except Exception as e:
                     logging.error(f"Failed to write Monitor to sheets: {e}")
@@ -452,13 +473,14 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                     f"<b>Time:</b> {ts.strftime('%H:%M')}\n"
                     f"<b>Spot Price:</b> {close:.2f}\n"
                     f"<b>Exit Price:</b> Rs {current_opt_price:.2f}\n"
-                    f"<b>SL - Spot 13 EMA:</b> {ema_sl:.2f}\n"
-                    f"<b>SL - Premium 13 EMA:</b> {opt_ema_sl:.2f}\n"
                     f"<b>Reason:</b> {exit_reason}\n"
-                    f"<b>PnL:</b> {pnl_pct:.2f}%"
+                    f"<b>PnL:</b> {pnl_pct:.2f}%\n\n"
+                    f"<b>SL - Spot 13 EMA:</b> {ema_sl:.2f}\n"
+                    f"<b>SL - Prem 13 EMA:</b> {opt_ema_sl:.2f}\n"
+                    f"<b>SL - Spot PSAR:</b> {spot_psar:.2f}\n"
+                    f"<b>SL - Prem PSAR:</b> {opt_psar:.2f}"
                 )
                 send_telegram_alert(msg)
-                logging.info(f"EXIT {symbol} at {current_opt_price} | PnL: {pnl_pct:.2f}%")
 
                 try:
                     trade_row = [
@@ -469,8 +491,7 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                     ]
                     append_to_sheet(sh, f"Live_Trades_{trading_date.isoformat()}", TRADE_HEADERS, trade_row)
                     trade_sheet = position.get("trade_sheet")
-                    if trade_sheet:
-                        log_trade_event(sh, trade_sheet, "EXIT", close, current_opt_price, ema_sl, opt_ema_sl, pnl_pct, notes=exit_reason)
+                    if trade_sheet: log_trade_event(sh, trade_sheet, "EXIT", close, current_opt_price, ema_sl, opt_ema_sl, pnl_pct, notes=exit_reason)
                     clear_open_position_from_sheet(sh, underlying)
                 except Exception as e:
                     logging.error(f"Failed to write Exit to sheets: {e}")
@@ -525,8 +546,6 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
         append_to_sheet(sh, f"Live_Heartbeat_{trading_date.isoformat()}", HEARTBEAT_HEADERS, heartbeat_row)
     except Exception as e:
         logging.warning(f"Heartbeat sheet append skipped (API limits): {e}")
-        
-    logging.info(f"[{ts.strftime('%H:%M')}] {underlying} HEARTBEAT: {status_str} | Spot: {close:.1f}")
 
     can_enter = (active_positions[underlying] is None) and (daily_trade_counts[underlying] < MAX_TRADES_PER_DAY) and (ENTRY_WINDOW_START <= t <= ENTRY_WINDOW_END)
     if can_enter and signal:
@@ -534,7 +553,6 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
         symbol, token = fetch_option_token(option_lookup, underlying, expiry_date, atm_strike, signal)
 
         if token is None:
-            logging.error(f"[{underlying}] Could not resolve option token for symbol '{symbol}'. Entry skipped.")
             return
 
         day_from_warmup = day_from - dt.timedelta(days=INDICATOR_WARMUP_DAYS)
@@ -542,7 +560,6 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
 
         if opt_df.empty:
             for opt_fetch_attempt in range(1, DATA_FRESHNESS_RETRIES + 1):
-                logging.warning(f"[{underlying}] Option candle fetch empty for {symbol} (attempt {opt_fetch_attempt}/{DATA_FRESHNESS_RETRIES}) — retrying in {DATA_FRESHNESS_RETRY_DELAY}s...")
                 time.sleep(DATA_FRESHNESS_RETRY_DELAY)
                 now = get_ist_now()
                 opt_df, smart = get_candles_with_relogin(smart, token, day_from_warmup, now, exchange="NFO", interval=INTERVAL)
@@ -550,24 +567,29 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                     break
 
         if opt_df.empty:
-            logging.error(f"[{underlying}] GAVE UP entering {symbol} — option candle data still empty after {DATA_FRESHNESS_RETRIES} retries. Entry skipped this cycle.")
             return
 
         if not opt_df.empty:
             opt_df["ema_sl"] = opt_df["close"].ewm(span=EMA_SL_PERIOD, adjust=False).mean()
+            opt_df["psar"] = compute_psar(opt_df)
             opt_row = opt_df[opt_df["timestamp"] == ts]
 
             if not opt_row.empty:
                 candle_entry_price = opt_row.iloc[0]["close"]
                 opt_ema_sl = opt_row.iloc[0]["ema_sl"]
+                opt_psar = opt_row.iloc[0]["psar"]
             else:
                 candle_entry_price = opt_df.iloc[-2]["close"] if len(opt_df) > 1 else opt_df.iloc[-1]["close"]
                 opt_ema_sl = opt_df.iloc[-2]["ema_sl"] if len(opt_df) > 1 else opt_df.iloc[-1]["ema_sl"]
+                opt_psar = opt_df.iloc[-2]["psar"] if len(opt_df) > 1 else opt_df.iloc[-1]["psar"]
 
             ltp_price, smart = get_ltp(smart, symbol, token, exchange="NFO")
             entry_price = ltp_price if ltp_price is not None else candle_entry_price
-            if ltp_price is None:
-                logging.warning(f"[{underlying}] LTP fetch failed for {symbol}, falling back to candle close for entry pricing.")
+            
+            if config["exit_mode"] == "SPOT_EMA": active_sl = ema_sl
+            elif config["exit_mode"] == "PREMIUM_EMA": active_sl = opt_ema_sl
+            elif config["exit_mode"] == "SPOT_PSAR": active_sl = spot_psar
+            elif config["exit_mode"] == "PREMIUM_PSAR": active_sl = opt_psar
 
             daily_trade_counts[underlying] += 1
             active_positions[underlying] = {
@@ -580,8 +602,8 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                 "token": token,
                 "trade_num": daily_trade_counts[underlying],
                 "latest_opt_price": entry_price,
-                "latest_opt_sl": opt_ema_sl,
-                "last_alerted_sl": ema_sl if config["exit_mode"] == "SPOT_EMA" else opt_ema_sl,
+                "latest_opt_sl": active_sl,
+                "last_alerted_sl": active_sl,
                 "trade_sheet": make_trade_sheet_name(underlying, daily_trade_counts[underlying], trading_date)
             }
 
@@ -590,19 +612,17 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                 f"<b>Symbol:</b> <code>{symbol}</code>\n"
                 f"<b>Time:</b> {ts.strftime('%H:%M')}\n"
                 f"<b>Spot Price:</b> {close:.2f}\n"
-                f"<b>Entry Price:</b> Rs {entry_price:.2f}\n"
+                f"<b>Entry Price:</b> Rs {entry_price:.2f}\n\n"
                 f"<b>SL - Spot 13 EMA:</b> {ema_sl:.2f}\n"
-                f"<b>SL - Premium 13 EMA:</b> {opt_ema_sl:.2f}"
+                f"<b>SL - Prem 13 EMA:</b> {opt_ema_sl:.2f}\n"
+                f"<b>SL - Spot PSAR:</b> {spot_psar:.2f}\n"
+                f"<b>SL - Prem PSAR:</b> {opt_psar:.2f}"
             )
             send_telegram_alert(msg)
-            logging.info(f"==> ENTRY FIRE: {underlying} BUY {signal} {symbol} @ Rs {entry_price}")
 
             try:
                 save_open_position_to_sheet(sh, underlying, active_positions[underlying], trading_date)
-                log_trade_event(
-                    sh, active_positions[underlying]["trade_sheet"], "ENTRY",
-                    close, entry_price, ema_sl, opt_ema_sl, 0.0, notes=signal
-                )
+                log_trade_event(sh, active_positions[underlying]["trade_sheet"], "ENTRY", close, entry_price, ema_sl, opt_ema_sl, 0.0, notes=signal)
             except Exception as e:
                 logging.error(f"Failed to write Entry to sheets: {e}")
 
@@ -630,7 +650,7 @@ def run_live_trading_engine(stop_event, sheet_id):
         send_telegram_alert(f"⚠️ <b>Startup Failure:</b> {e}")
         return
 
-    send_telegram_alert("🚀 <b>Pro Engine v7.4 Started - Live Trading NIFTY</b>")
+    send_telegram_alert("🚀 <b>Pro Engine v7.5 Started - Live Trading NIFTY</b>")
 
     while not stop_event.is_set():
         now = get_ist_now()
@@ -656,11 +676,7 @@ def run_live_trading_engine(stop_event, sheet_id):
 
         def safe_evaluate(und):
             try:
-                evaluate_candle(
-                    smart, lookups[und], gc, sh, und,
-                    INDEX_PARAMS[und]["token"], INDEX_PARAMS[und]["strike_step"], INDEX_PARAMS[und]["expiry"],
-                    active_positions, daily_trade_counts, last_processed, trading_date
-                )
+                evaluate_candle(smart, lookups[und], gc, sh, und, INDEX_PARAMS[und]["token"], INDEX_PARAMS[und]["strike_step"], INDEX_PARAMS[und]["expiry"], active_positions, daily_trade_counts, last_processed, trading_date)
             except Exception as e:
                 logging.error(f"Error evaluating {und}: {e}", exc_info=True)
 
@@ -675,8 +691,7 @@ def apply_slippage(action, price):
     return (round(price - adj, 2), round(adj, 2)) if action == "SELL" else (round(price + adj, 2), round(adj, 2))
 
 def compute_charges(action, price, qty):
-    if not ENABLE_TRANSACTION_COSTS:
-        return 0.0
+    if not ENABLE_TRANSACTION_COSTS: return 0.0
     turnover = price * qty
     brokerage = BROKERAGE_PER_ORDER
     stt = turnover * STT_SELL_PCT if action == "SELL" else 0.0
@@ -709,8 +724,8 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
     strategies = [
         {"name": "SPOT_13_EMA", "mode": "SPOT_EMA", "period": 13},
         {"name": "PREM_13_EMA", "mode": "PREMIUM_EMA", "period": 13},
-        {"name": "PREM_15_EMA", "mode": "PREMIUM_EMA", "period": 15},
-        {"name": "PREM_21_EMA", "mode": "PREMIUM_EMA", "period": 21}
+        {"name": "SPOT_PSAR", "mode": "SPOT_PSAR", "period": 0},
+        {"name": "PREM_PSAR", "mode": "PREMIUM_PSAR", "period": 0}
     ]
 
     all_trades_results = {}
@@ -723,7 +738,7 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
         trades_count = 0
 
         for idx, row in day_df.iterrows():
-            ts, t, close, high, low, ema_sl = row["timestamp"], row["timestamp"].time(), row["close"], row["high"], row["low"], row["ema_sl"]
+            ts, t, close, high, low, ema_sl, spot_psar = row["timestamp"], row["timestamp"].time(), row["close"], row["high"], row["low"], row["ema_sl"], row["psar"]
             if t > dt.time(15, 10):
                 break
 
@@ -735,19 +750,19 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
                     pnl_pct = ((current_price - position["entry_price"]) / position["entry_price"]) * 100.0
 
                     exit_reason = None
-                    if pnl_pct <= -STOP_LOSS_PCT:
-                        exit_reason = "HARD_STOP_LOSS_HIT"
-                    elif t >= EOD_EXIT_TIME:
-                        exit_reason = "EOD_SQUAREOFF"
+                    if pnl_pct <= -STOP_LOSS_PCT: exit_reason = "HARD_STOP_LOSS_HIT"
+                    elif t >= EOD_EXIT_TIME: exit_reason = "EOD_SQUAREOFF"
                     elif strat["mode"] == "SPOT_EMA":
-                        if position["direction"] == "CE" and close < ema_sl:
-                            exit_reason = f"SPOT_EMA{strat['period']}_CROSSDOWN"
-                        elif position["direction"] == "PE" and close > ema_sl:
-                            exit_reason = f"SPOT_EMA{strat['period']}_CROSSUP"
+                        if position["direction"] == "CE" and close < ema_sl: exit_reason = f"SPOT_EMA{strat['period']}_CROSSDOWN"
+                        elif position["direction"] == "PE" and close > ema_sl: exit_reason = f"SPOT_EMA{strat['period']}_CROSSUP"
                     elif strat["mode"] == "PREMIUM_EMA":
                         ema_col = f"ema_sl_{strat['period']}"
-                        if current_price < matching_candle.iloc[0][ema_col]:
-                            exit_reason = f"PREMIUM_EMA{strat['period']}_CROSSDOWN"
+                        if current_price < matching_candle.iloc[0][ema_col]: exit_reason = f"PREMIUM_EMA{strat['period']}_CROSSDOWN"
+                    elif strat["mode"] == "SPOT_PSAR":
+                        if position["direction"] == "CE" and close < spot_psar: exit_reason = "SPOT_PSAR_CROSSDOWN"
+                        elif position["direction"] == "PE" and close > spot_psar: exit_reason = "SPOT_PSAR_CROSSUP"
+                    elif strat["mode"] == "PREMIUM_PSAR":
+                        if current_price < matching_candle.iloc[0]["psar"]: exit_reason = "PREMIUM_PSAR_CROSSDOWN"
 
                     if exit_reason:
                         exit_exec, _ = apply_slippage("SELL", current_price)
@@ -804,25 +819,23 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
                     if tok:
                         if tok not in option_cache:
                             opt_df, smart = get_candles_with_relogin(smart, tok, warmup_from, day_to, exchange="NFO", interval=INTERVAL)
-                            if not opt_df.empty:
-                                option_cache[tok] = opt_df.copy()
+                            if not opt_df.empty: option_cache[tok] = opt_df.copy()
                         if tok in option_cache and not option_cache[tok].empty:
-                            ema_col = f"ema_sl_{strat['period']}"
-                            if ema_col not in option_cache[tok].columns:
-                                option_cache[tok][ema_col] = option_cache[tok]["close"].ewm(span=strat["period"], adjust=False).mean()
+                            if strat["mode"] == "PREMIUM_EMA":
+                                ema_col = f"ema_sl_{strat['period']}"
+                                if ema_col not in option_cache[tok].columns:
+                                    option_cache[tok][ema_col] = option_cache[tok]["close"].ewm(span=strat["period"], adjust=False).mean()
+                            elif "PSAR" in strat["mode"]:
+                                if "psar" not in option_cache[tok].columns:
+                                    option_cache[tok]["psar"] = compute_psar(option_cache[tok])
+                            
                             if not option_cache[tok][option_cache[tok]["timestamp"] == ts].empty:
                                 raw_entry = option_cache[tok][option_cache[tok]["timestamp"] == ts].iloc[0]["close"]
                                 trades_count += 1
                                 position = {
-                                    "direction": signal,
-                                    "entry_ts": ts,
-                                    "entry_price": apply_slippage("BUY", raw_entry)[0],
-                                    "spot_entry": close,
-                                    "atm_strike": atm_strike,
-                                    "symbol": sym,
-                                    "token": tok,
-                                    "trade_num": trades_count,
-                                    "opt_df": option_cache[tok]
+                                    "direction": signal, "entry_ts": ts, "entry_price": apply_slippage("BUY", raw_entry)[0],
+                                    "spot_entry": close, "atm_strike": atm_strike, "symbol": sym, "token": tok,
+                                    "trade_num": trades_count, "opt_df": option_cache[tok]
                                 }
 
         all_trades_results[strat["name"]] = pd.DataFrame(trades)
@@ -833,14 +846,9 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
         win_rate = round((wins / len(trades)) * 100, 2) if trades else 0.0
 
         summary_rows.append({
-            "Strategy": strat["name"],
-            "Date": trade_date.isoformat(),
-            "Expiry": expiry_date.isoformat(),
-            "Trades": len(trades),
-            "Win Rate (%)": win_rate,
-            "Gross PnL (₹)": round(gross_total, 2),
-            "Charges (₹)": round(charges_total, 2),
-            "Net PnL (₹)": round(net_total, 2)
+            "Strategy": strat["name"], "Date": trade_date.isoformat(), "Expiry": expiry_date.isoformat(),
+            "Trades": len(trades), "Win Rate (%)": win_rate, "Gross PnL (₹)": round(gross_total, 2),
+            "Charges (₹)": round(charges_total, 2), "Net PnL (₹)": round(net_total, 2)
         })
 
     return pd.DataFrame(summary_rows), all_trades_results
@@ -853,7 +861,7 @@ if "stop_event" not in st.session_state:
 if "is_running" not in st.session_state:
     st.session_state.is_running = False
 
-st.title("📈 Pro Momentum Engine (v7.4 Hybrid)")
+st.title("📈 Pro Momentum Engine (v7.5 Hybrid)")
 tab_live, tab_backtest = st.tabs(["🔴 Live Trading", "🧪 Dynamic Backtest"])
 
 with tab_live:
@@ -893,8 +901,8 @@ with tab_backtest:
                 if not res_df.empty:
                     st.dataframe(res_df, width="stretch")
                     st.write("### Strategy Trade Logs")
-                    t_tabs = st.tabs(["Spot 13 EMA", "Prem 13 EMA", "Prem 15 EMA", "Prem 21 EMA"])
-                    strat_keys = ["SPOT_13_EMA", "PREM_13_EMA", "PREM_15_EMA", "PREM_21_EMA"]
+                    t_tabs = st.tabs(["Spot 13 EMA", "Prem 13 EMA", "Spot PSAR", "Prem PSAR"])
+                    strat_keys = ["SPOT_13_EMA", "PREM_13_EMA", "SPOT_PSAR", "PREM_PSAR"]
                     for i, key in enumerate(strat_keys):
                         with t_tabs[i]:
                             df_res = trades_dict[key]
@@ -903,6 +911,6 @@ with tab_backtest:
                             else:
                                 st.info(f"No trades generated under {key}.")
                 else:
-                    st.info("No trades triggered for these parameters. Try adjusting your Loxx multiplier or check if options data exists for this expiry.")
+                    st.info("No trades triggered for these parameters. Try adjusting your Loxx multiplier.")
             except Exception as e:
                 st.error(f"Backtest execution failed: {e}")
