@@ -41,7 +41,7 @@ GOOGLE_SERVICE_ACCOUNT_JSON = "service_account.json"
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", "8981928115:AAEtIU9VAix-mwD52zis38Wql4eD8kLEKcI")
 TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID", "8672437349")
 
-LIVE_INDICES = ["NIFTY", "BANKNIFTY"]
+LIVE_INDICES = ["NIFTY"]
 BACKTEST_INDICES = ["NIFTY", "BANKNIFTY"]
 INTERVAL = "THREE_MINUTE"
 INDICATOR_WARMUP_DAYS = 5
@@ -120,7 +120,6 @@ def get_sheet_client():
 def send_telegram_alert(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        # Switched to HTML parsing to prevent unescaped markdown strings from silently failing the API request
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
         resp = requests.post(url, json=payload, timeout=5)
         if resp.status_code != 200:
@@ -422,7 +421,6 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                     exit_reason = f"PREMIUM_EMA{EMA_SL_PERIOD}_CROSSDOWN"
 
             if exit_reason is None:
-                # Alert fires FIRST to guarantee notification before Google Sheets operations
                 monitor_msg = (
                     f"🔵 <b>{underlying} Update</b> 🔵\n\n"
                     f"<b>Symbol:</b> <code>{symbol}</code>\n"
@@ -448,7 +446,6 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                     logging.error(f"Failed to write Monitor to sheets: {e}")
 
             if exit_reason:
-                # Alert fires FIRST to guarantee notification
                 msg = (
                     f"🔴 <b>{underlying} Exit</b> 🔴\n\n"
                     f"<b>Symbol:</b> <code>{symbol}</code>\n"
@@ -588,7 +585,6 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
                 "trade_sheet": make_trade_sheet_name(underlying, daily_trade_counts[underlying], trading_date)
             }
 
-            # 1. Alert Telegram FIRST
             msg = (
                 f"🟢 <b>{underlying} Entry</b> 🟢\n\n"
                 f"<b>Symbol:</b> <code>{symbol}</code>\n"
@@ -601,7 +597,6 @@ def evaluate_candle(smart, option_lookup, gc, sh, underlying, index_token, strik
             send_telegram_alert(msg)
             logging.info(f"==> ENTRY FIRE: {underlying} BUY {signal} {symbol} @ Rs {entry_price}")
 
-            # 2. Write to Google Sheets
             try:
                 save_open_position_to_sheet(sh, underlying, active_positions[underlying], trading_date)
                 log_trade_event(
@@ -635,7 +630,7 @@ def run_live_trading_engine(stop_event, sheet_id):
         send_telegram_alert(f"⚠️ <b>Startup Failure:</b> {e}")
         return
 
-    send_telegram_alert("🚀 <b>Pro Engine v7.4 Started - Live Trading NIFTY & BANKNIFTY</b>")
+    send_telegram_alert("🚀 <b>Pro Engine v7.4 Started - Live Trading NIFTY</b>")
 
     while not stop_event.is_set():
         now = get_ist_now()
@@ -814,7 +809,7 @@ def run_backtest_suite(underlying, trade_date, expiry_date):
                         if tok in option_cache and not option_cache[tok].empty:
                             ema_col = f"ema_sl_{strat['period']}"
                             if ema_col not in option_cache[tok].columns:
-                                option_cache[tok][ema_col] = option_cache[tok]["close"].ewm(span=strat['period"], adjust=False).mean()
+                                option_cache[tok][ema_col] = option_cache[tok]["close"].ewm(span=strat["period"], adjust=False).mean()
                             if not option_cache[tok][option_cache[tok]["timestamp"] == ts].empty:
                                 raw_entry = option_cache[tok][option_cache[tok]["timestamp"] == ts].iloc[0]["close"]
                                 trades_count += 1
@@ -864,14 +859,14 @@ tab_live, tab_backtest = st.tabs(["🔴 Live Trading", "🧪 Dynamic Backtest"])
 with tab_live:
     st.subheader("Live Execution Control Center")
     if not st.session_state.is_running:
-        if st.button("▶️ Start Live Engine (Parallel Threads)", type="primary", width="stretch"):
+        if st.button("▶️ Start Live Engine (NIFTY Only)", type="primary", width="stretch"):
             st.session_state.stop_event.clear()
             st.session_state.bot_thread = threading.Thread(target=run_live_trading_engine, args=(st.session_state.stop_event, sheet_id_input), daemon=True)
             st.session_state.bot_thread.start()
             st.session_state.is_running = True
             st.rerun()
     else:
-        st.success("🟢 Engine is active. NIFTY and BANKNIFTY are evaluating concurrently with your exact refined script logic.")
+        st.success("🟢 Engine is active. Live tracking is currently restricted to NIFTY.")
         if st.button("⏹️ Stop Live Engine", width="stretch"):
             st.session_state.stop_event.set()
             st.session_state.bot_thread.join(timeout=5)
