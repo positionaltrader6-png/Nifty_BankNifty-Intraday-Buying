@@ -86,7 +86,7 @@ TRADE_MONITOR_HEADERS = ["timestamp", "event", "spot_price", "premium_price", "s
 # ─── 2. SIDEBAR CONFIGURATION ───
 st.sidebar.header("⚙️ Index Parameters")
 
-nifty_expiry = st.sidebar.date_input("NIFTY Expiry Date", value=dt.date(2026, 9, 8), key="sb_nifty_exp")
+nifty_expiry = st.sidebar.date_input("NIFTY Expiry Date", value=dt.date(2026, 9, 1), key="sb_nifty_exp")
 nifty_loxx = st.sidebar.number_input("NIFTY Loxx Multiplier", value=0.9, step=0.1, key="sb_nifty_loxx")
 nifty_exit = st.sidebar.selectbox("NIFTY Live Exit Mode", ["SPOT_EMA", "PREMIUM_EMA", "SPOT_PSAR", "PREMIUM_PSAR"], index=0, key="sb_nifty_exit")
 
